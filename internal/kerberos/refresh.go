@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/mrkhachaturov/docker-external-dns/transport-rfc2136/internal/state"
+	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/state"
 )
 
 // DefaultRefreshInterval is half of the AD default ticket lifetime (24h), giving

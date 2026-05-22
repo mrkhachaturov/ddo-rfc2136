@@ -10,7 +10,7 @@ import (
 func TestBuildUpdateMsg_AddAndDelete(t *testing.T) {
 	prereqs := []Prereq{
 		{Kind: "NXRRSET", Name: "app.example.com", Type: "A"},
-		{Kind: "YXRRSET", Name: "dnsync-a.app.example.com", Type: "TXT", Value: "\"owned-by=test:1\""},
+		{Kind: "YXRRSET", Name: "ddo-a.app.example.com", Type: "TXT", Value: "\"owned-by=test:1\""},
 	}
 	changes := []Change{
 		{Op: "add", Record: Record{Name: "app.example.com", Type: "A", TTL: 300, Value: "10.1.2.3"}},

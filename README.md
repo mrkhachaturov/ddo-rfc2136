@@ -1,6 +1,6 @@
 # rfc2136-transport
 
-A small Go service that owns the RFC 2136 DNS UPDATE + RFC 3645 GSS-TSIG protocol layer for `docker-external-dns`. The NestJS orchestrator talks to it over HTTP+JSON.
+A small Go service that owns the RFC 2136 DNS UPDATE + RFC 3645 GSS-TSIG protocol layer for `docker-dns-operator`. The NestJS orchestrator talks to it over HTTP+JSON.
 
 ## Why this exists
 
@@ -37,7 +37,7 @@ go test ./...
 ## Run locally
 
 ```bash
-docker build -t docker-external-dns-transport:dev .
+docker build -t docker-dns-operator-transport:dev .
 docker run --rm \
   -e TRANSPORT_LISTEN=:9090 \
   -e RFC2136_KERBEROS_REALM=CORP.EXAMPLE.COM \
@@ -46,7 +46,7 @@ docker run --rm \
   -v $(pwd)/test/keytab:/keytab:ro \
   -v $(pwd)/test/krb5.conf:/etc/krb5.conf:ro \
   -p 127.0.0.1:9090:9090 \
-  docker-external-dns-transport:dev
+  docker-dns-operator-transport:dev
 ```
 
 ## Failure model

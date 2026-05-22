@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrkhachaturov/docker-external-dns/transport-rfc2136/internal/dnsop"
-	"github.com/mrkhachaturov/docker-external-dns/transport-rfc2136/internal/state"
+	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/dnsop"
+	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/state"
 )
 
 type fakeClient struct {
