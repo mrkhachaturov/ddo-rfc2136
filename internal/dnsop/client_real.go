@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bodgit/tsig/gss"
@@ -98,12 +99,59 @@ func classifyExchangeResult(resp *dns.Msg, err error) ApplyResult {
 		if resp != nil {
 			return ClassifyRcode(resp.Rcode)
 		}
+		// No response, only an error — try to extract a TSIG-subcode hint
+		// from the error message before falling back to a generic
+		// "dns-send" classification. bodgit/tsig surfaces BADTIME / BADSIG
+		// / BADKEY via the err string; pattern-matching is brittle but the
+		// diagnosability win is large (operators see "clock skew" instead
+		// of "dial tcp …").
+		if r, ok := classifyTSIGError(err); ok {
+			return r
+		}
 		return ApplyResult{OK: false, Phase: "dns-send", Message: err.Error(), Retryable: true}
 	}
 	if resp == nil {
 		return ApplyResult{OK: false, Phase: "dns-receive", Message: "nil response", Retryable: true}
 	}
 	return ClassifyRcode(resp.Rcode)
+}
+
+// classifyTSIGError matches well-known TSIG-subcode substrings in the error
+// message and returns a tailored ApplyResult. The matches are case-insensitive
+// because different libraries print the codes in different cases.
+//
+//   - BADTIME: clock skew — retryable, ops should fix NTP on the client or DC.
+//   - BADSIG:  TSIG signature mismatch — not retryable, almost always a
+//              shared-secret or principal config issue; retrying won't help.
+//   - BADKEY:  the server doesn't recognise the key name — not retryable,
+//              points at a keytab/principal mismatch or stale GSS context.
+func classifyTSIGError(err error) (ApplyResult, bool) {
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "badtime") || strings.Contains(lower, "bad time"):
+		return ApplyResult{
+			OK:        false,
+			Phase:     "tsig-verify",
+			Message:   "clock skew between client and DC: " + msg,
+			Retryable: true,
+		}, true
+	case strings.Contains(lower, "badsig") || strings.Contains(lower, "bad signature"):
+		return ApplyResult{
+			OK:        false,
+			Phase:     "tsig-verify",
+			Message:   "TSIG signature mismatch (check principal/keytab/realm): " + msg,
+			Retryable: false,
+		}, true
+	case strings.Contains(lower, "badkey") || strings.Contains(lower, "key not found"):
+		return ApplyResult{
+			OK:        false,
+			Phase:     "tsig-verify",
+			Message:   "TSIG key not recognised by server (check principal/keytab): " + msg,
+			Retryable: false,
+		}, true
+	}
+	return ApplyResult{}, false
 }
 
 // Convenience for main.go wiring.

@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/mrkhachaturov/docker-external-dns/transport-rfc2136/internal/dnsop"
+	"github.com/mrkhachaturov/docker-external-dns/transport-rfc2136/internal/state"
 )
 
 type fakeClient struct {
@@ -84,4 +86,66 @@ func TestApplyHandler_PassesPrereqsAndChanges(t *testing.T) {
 func readAll(b interface{ Read(p []byte) (int, error) }) string {
 	out, _ := io.ReadAll(b)
 	return string(out)
+}
+
+func TestHealthz_NoStateReportsReadyForBackCompat(t *testing.T) {
+	h := NewHandlers(&fakeClient{}, false)
+	rr := httptest.NewRecorder()
+	h.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var resp HealthResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+	if !resp.OK || resp.Kerberos != "ready" {
+		t.Fatalf("bad response: %+v", resp)
+	}
+}
+
+func TestHealthz_UnknownBeforeFirstRefresh(t *testing.T) {
+	st := state.NewKerberos()
+	h := NewHandlersWithState(&fakeClient{}, false, st)
+	rr := httptest.NewRecorder()
+	h.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503 for unknown state", rr.Code)
+	}
+	var resp HealthResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+	if resp.OK || resp.Kerberos != "unknown" {
+		t.Fatalf("bad response: %+v", resp)
+	}
+}
+
+func TestHealthz_ReadyReturns200(t *testing.T) {
+	st := state.NewKerberos()
+	st.MarkReady(time.Unix(1700000000, 0))
+	h := NewHandlersWithState(&fakeClient{}, false, st)
+	rr := httptest.NewRecorder()
+	h.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", rr.Code)
+	}
+	var resp HealthResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+	if !resp.OK || resp.Kerberos != "ready" || resp.Detail != "" {
+		t.Fatalf("bad response: %+v", resp)
+	}
+}
+
+func TestHealthz_ExpiredReturns503WithDetail(t *testing.T) {
+	st := state.NewKerberos()
+	st.MarkReady(time.Unix(1700000000, 0))
+	st.MarkExpired("kinit: KDC unreachable")
+	h := NewHandlersWithState(&fakeClient{}, false, st)
+	rr := httptest.NewRecorder()
+	h.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", rr.Code)
+	}
+	var resp HealthResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+	if resp.OK || resp.Kerberos != "expired" || resp.Detail != "kinit: KDC unreachable" {
+		t.Fatalf("bad response: %+v", resp)
+	}
 }
