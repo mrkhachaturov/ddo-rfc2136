@@ -93,7 +93,7 @@ func (c *RealClient) Update(host string, port int, zone string, prereqs []Prereq
 func classifyExchangeResult(resp *dns.Msg, err error) ApplyResult {
 	if err != nil {
 		if resp != nil && resp.Rcode == dns.RcodeSuccess {
-			log.Printf("rfc2136-transport: WARN response TSIG verify quirk (committed, rcode=NOERROR): %v", err)
+			log.Printf("rfc2136-webhook: WARN response TSIG verify quirk (committed, rcode=NOERROR): %v", err)
 			return ApplyResult{OK: true, Rcode: "NOERROR"}
 		}
 		if resp != nil {

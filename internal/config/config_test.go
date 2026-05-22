@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoad_HappyPath(t *testing.T) {
-	t.Setenv("TRANSPORT_LISTEN", ":9090")
+	t.Setenv("WEBHOOK_LISTEN", ":9090")
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")

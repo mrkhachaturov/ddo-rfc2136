@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/state"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/state"
 )
 
 // countingExec records the kinit invocations and lets each call return a

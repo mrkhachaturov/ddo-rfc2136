@@ -1,6 +1,6 @@
 package api
 
-import "github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/dnsop"
+import "github.com/mrkhachaturov/ddo-rfc2136/internal/dnsop"
 
 type RecordsRequest struct {
 	Host string `json:"host"`
