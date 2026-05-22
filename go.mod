@@ -1,4 +1,4 @@
-module github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136
+module github.com/mrkhachaturov/ddo-rfc2136
 
 go 1.22
 

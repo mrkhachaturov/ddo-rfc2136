@@ -8,11 +8,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/api"
-	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/config"
-	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/dnsop"
-	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/kerberos"
-	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/state"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/api"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/config"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/dnsop"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/kerberos"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/state"
 )
 
 func main() {
@@ -20,7 +20,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	log.Printf("rfc2136-transport listen=%s principal=%s dryRun=%v kinitRefresh=%v",
+	log.Printf("rfc2136-webhook listen=%s principal=%s dryRun=%v kinitRefresh=%v",
 		cfg.Listen, cfg.Principal, cfg.DryRun, cfg.KinitRefreshInterval)
 
 	k := &kerberos.Kinit{Exec: kerberos.RealExec{}}

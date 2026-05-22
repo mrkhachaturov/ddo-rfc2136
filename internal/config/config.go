@@ -30,7 +30,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	c := Config{
-		Listen:               envOr("TRANSPORT_LISTEN", ":9090"),
+		Listen:               envOr("WEBHOOK_LISTEN", ":9090"),
 		Realm:                os.Getenv("RFC2136_KERBEROS_REALM"),
 		Principal:            os.Getenv("RFC2136_KERBEROS_PRINCIPAL"),
 		Keytab:               os.Getenv("RFC2136_KEYTAB_FILE"),

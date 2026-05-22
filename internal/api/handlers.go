@@ -5,8 +5,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/dnsop"
-	"github.com/mrkhachaturov/docker-dns-operator/transport-rfc2136/internal/state"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/dnsop"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/state"
 )
 
 type Handlers struct {
