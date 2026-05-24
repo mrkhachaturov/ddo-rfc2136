@@ -12,6 +12,7 @@ import (
 	"github.com/mrkhachaturov/ddo-rfc2136/internal/config"
 	"github.com/mrkhachaturov/ddo-rfc2136/internal/dnsop"
 	"github.com/mrkhachaturov/ddo-rfc2136/internal/kerberos"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/orchestrator"
 	"github.com/mrkhachaturov/ddo-rfc2136/internal/state"
 )
 
@@ -24,8 +25,9 @@ func main() {
 	if cfg.Password != "" {
 		authMode = "password"
 	}
-	log.Printf("rfc2136-webhook listen=%s principal=%s authMode=%s dryRun=%v kinitRefresh=%v",
-		cfg.Listen, cfg.Principal, authMode, cfg.DryRun, cfg.KinitRefreshInterval)
+	log.Printf("ddo-rfc2136 listen=%s principal=%s authMode=%s dryRun=%v kinitRefresh=%v hosts=%v zones=%v axfr=%v",
+		cfg.Listen, cfg.Principal, authMode, cfg.DryRun, cfg.KinitRefreshInterval,
+		cfg.Hosts, cfg.Zones, cfg.AxfrEnabled)
 
 	k := &kerberos.Kinit{Exec: kerberos.RealExec{}}
 	var kinitErr error
@@ -63,16 +65,32 @@ func main() {
 		}
 	}()
 
-	client, err := dnsop.NewRealClient(cfg.Realm, cfg.Principal, 30*time.Second, 15*time.Second)
+	client, err := dnsop.NewRealClient(cfg.Realm, cfg.Principal, cfg.AxfrTimeout, cfg.UpdateTimeout)
 	if err != nil {
 		log.Fatalf("dns client: %v", err)
 	}
-	h := api.NewHandlersWithState(client, cfg.DryRun, krbState)
+
+	orc := orchestrator.New(orchestrator.Options{
+		Hosts:                   cfg.Hosts,
+		Port:                    cfg.Port,
+		Zones:                   cfg.Zones,
+		AxfrEnabled:             cfg.AxfrEnabled,
+		DefaultTTL:              cfg.DefaultTTL,
+		MinTTL:                  cfg.MinTTL,
+		CircuitBreakerThreshold: cfg.CircuitBreakerThreshold,
+		DomainFilter:            cfg.DomainFilter,
+		OwnershipLabel:          cfg.OwnershipLabel,
+		DryRun:                  cfg.DryRun,
+	}, client)
+
+	h := api.NewHandlers(orc, krbState)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", h.Negotiate)
+	mux.HandleFunc("GET /records", h.Records)
+	mux.HandleFunc("POST /records", h.ApplyChanges)
+	mux.HandleFunc("POST /adjustendpoints", h.AdjustEndpoints)
 	mux.HandleFunc("GET /healthz", h.Healthz)
-	mux.HandleFunc("POST /v1/records", h.Records)
-	mux.HandleFunc("POST /v1/apply", h.Apply)
 
 	srv := &http.Server{Addr: cfg.Listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("listening on %s", cfg.Listen)
