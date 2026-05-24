@@ -310,7 +310,7 @@ func parseHosts(raw string) ([]string, error) {
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		h := strings.TrimSpace(strings.TrimSuffix(strings.ToLower(p), "."))
+		h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(p)), ".")
 		if h == "" {
 			continue
 		}
@@ -335,7 +335,7 @@ func parseZones(raw string) ([]string, error) {
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		z := strings.TrimSpace(strings.TrimSuffix(strings.ToLower(p), "."))
+		z := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(p)), ".")
 		if z == "" {
 			continue
 		}
@@ -359,7 +359,7 @@ func parseDomainFilter(raw string) []string {
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		s := strings.TrimSpace(strings.TrimSuffix(strings.ToLower(p), "."))
+		s := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(p)), ".")
 		if s == "" {
 			continue
 		}
