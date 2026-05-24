@@ -9,10 +9,7 @@ import (
 )
 
 func TestLoad_HappyPath(t *testing.T) {
-	t.Setenv("WEBHOOK_LISTEN", ":9090")
-	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	withRequiredEnv(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -25,10 +22,25 @@ func TestLoad_HappyPath(t *testing.T) {
 	}
 }
 
+// withRequiredEnv sets the minimum env required by Load so individual tests
+// can focus on the variable they exercise. Tests that explicitly want a clean
+// env should call os.Clearenv() before invoking this helper.
+func withRequiredEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("WEBHOOK_LISTEN", ":9090")
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com,dc02.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
+}
+
 func TestLoad_MissingKeytab(t *testing.T) {
 	os.Clearenv()
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	_, err := Load()
 	if err == nil {
 		t.Fatalf("expected error on missing RFC2136_KEYTAB_FILE")
@@ -36,9 +48,7 @@ func TestLoad_MissingKeytab(t *testing.T) {
 }
 
 func TestLoad_DryRunFlag(t *testing.T) {
-	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	withRequiredEnv(t)
 	t.Setenv("RFC2136_DRY_RUN", "true")
 	cfg, _ := Load()
 	if !cfg.DryRun {
@@ -48,9 +58,7 @@ func TestLoad_DryRunFlag(t *testing.T) {
 
 func TestLoad_KinitRefreshIntervalDefaultIs12h(t *testing.T) {
 	os.Clearenv()
-	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	withRequiredEnv(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -62,9 +70,7 @@ func TestLoad_KinitRefreshIntervalDefaultIs12h(t *testing.T) {
 
 func TestLoad_KinitRefreshIntervalOverride(t *testing.T) {
 	os.Clearenv()
-	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	withRequiredEnv(t)
 	t.Setenv("RFC2136_KINIT_REFRESH_INTERVAL", "500ms")
 	cfg, err := Load()
 	if err != nil {
@@ -77,9 +83,7 @@ func TestLoad_KinitRefreshIntervalOverride(t *testing.T) {
 
 func TestLoad_KinitRefreshIntervalInvalid(t *testing.T) {
 	os.Clearenv()
-	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
-	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	withRequiredEnv(t)
 	t.Setenv("RFC2136_KINIT_REFRESH_INTERVAL", "not-a-duration")
 	_, err := Load()
 	if err == nil {
@@ -92,6 +96,8 @@ func TestLoad_Base64KeytabMaterialisesToTempFile(t *testing.T) {
 	want := []byte{0x05, 0x02, 0xde, 0xad, 0xbe, 0xef}
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	t.Setenv("RFC2136_KEYTAB_BASE64", base64.StdEncoding.EncodeToString(want))
 	cfg, err := Load()
 	if err != nil {
@@ -124,6 +130,8 @@ func TestLoad_Base64KeytabTrimsWhitespace(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString(want)
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	t.Setenv("RFC2136_KEYTAB_BASE64", "\n  "+encoded+"  \n")
 	cfg, err := Load()
 	if err != nil {
@@ -140,6 +148,8 @@ func TestLoad_Base64KeytabInvalidBase64Errors(t *testing.T) {
 	os.Clearenv()
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	t.Setenv("RFC2136_KEYTAB_BASE64", "***not-base64***")
 	if _, err := Load(); err == nil {
 		t.Fatalf("expected decode error")
@@ -150,6 +160,8 @@ func TestLoad_BothKeytabSourcesRejected(t *testing.T) {
 	os.Clearenv()
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
 	t.Setenv("RFC2136_KEYTAB_BASE64", base64.StdEncoding.EncodeToString([]byte("xyz")))
 	if _, err := Load(); err == nil {
@@ -161,6 +173,8 @@ func TestLoad_NoKeytabSourceErrors(t *testing.T) {
 	os.Clearenv()
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	if _, err := Load(); err == nil {
 		t.Fatalf("expected error when no auth source set")
 	}
@@ -170,6 +184,8 @@ func TestLoad_PasswordFromEnv(t *testing.T) {
 	os.Clearenv()
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	t.Setenv("RFC2136_AD_PASSWORD", "hunter2")
 	cfg, err := Load()
 	if err != nil {
@@ -192,6 +208,8 @@ func TestLoad_PasswordFromFile(t *testing.T) {
 	}
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	t.Setenv("RFC2136_AD_PASSWORD_FILE", pwPath)
 	cfg, err := Load()
 	if err != nil {
@@ -206,6 +224,8 @@ func TestLoad_PasswordFromMissingFile(t *testing.T) {
 	os.Clearenv()
 	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
 	t.Setenv("RFC2136_AD_PASSWORD_FILE", "/nonexistent/path/to/file")
 	if _, err := Load(); err == nil {
 		t.Fatalf("expected error when password file missing")
@@ -239,6 +259,8 @@ func TestLoad_MultipleAuthSourcesRejected(t *testing.T) {
 			os.Clearenv()
 			t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
 			t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+			t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+			t.Setenv("RFC2136_ZONES", "corp.example.com")
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
@@ -246,5 +268,188 @@ func TestLoad_MultipleAuthSourcesRejected(t *testing.T) {
 				t.Fatalf("expected mutual-exclusion error")
 			}
 		})
+	}
+}
+
+func TestLoad_HostsAndZonesParsed(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_HOSTS", " DC01.corp.example.com , dc02.corp.example.com. ")
+	t.Setenv("RFC2136_ZONES", "Corp.Example.COM., other.example.com")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(cfg.Hosts) != 2 || cfg.Hosts[0] != "dc01.corp.example.com" || cfg.Hosts[1] != "dc02.corp.example.com" {
+		t.Fatalf("hosts: %+v", cfg.Hosts)
+	}
+	if len(cfg.Zones) != 2 || cfg.Zones[0] != "corp.example.com" || cfg.Zones[1] != "other.example.com" {
+		t.Fatalf("zones: %+v", cfg.Zones)
+	}
+}
+
+func TestLoad_HostsRejectsIPLiteral(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_HOSTS", "10.1.2.3")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error rejecting IP literal in RFC2136_HOSTS")
+	}
+}
+
+func TestLoad_HostsRejectsBareLabel(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_HOSTS", "dc01")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error rejecting bare label in RFC2136_HOSTS")
+	}
+}
+
+func TestLoad_ZonesRequiresMultiLabel(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_ZONES", "corp")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error on single-label zone")
+	}
+}
+
+func TestLoad_DomainFilterParsed(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_DOMAIN_FILTER", "Corp.Example.COM.,svc.example.com")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(cfg.DomainFilter) != 2 || cfg.DomainFilter[0] != "corp.example.com" || cfg.DomainFilter[1] != "svc.example.com" {
+		t.Fatalf("DomainFilter: %+v", cfg.DomainFilter)
+	}
+}
+
+func TestLoad_DomainFilterEmptyByDefault(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(cfg.DomainFilter) != 0 {
+		t.Fatalf("expected empty domain filter, got %+v", cfg.DomainFilter)
+	}
+}
+
+func TestLoad_AxfrEnabledDefaultTrue(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if !cfg.AxfrEnabled {
+		t.Fatalf("AxfrEnabled should default to true")
+	}
+}
+
+func TestLoad_AxfrEnabledDisabled(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_AXFR_ENABLED", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.AxfrEnabled {
+		t.Fatalf("AxfrEnabled should be false")
+	}
+}
+
+func TestLoad_TTLsAndTimeouts(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_DEFAULT_TTL", "1800")
+	t.Setenv("RFC2136_MIN_TTL", "120")
+	t.Setenv("RFC2136_AXFR_TIMEOUT_SECONDS", "10")
+	t.Setenv("RFC2136_UPDATE_TIMEOUT_SECONDS", "5")
+	t.Setenv("RFC2136_CIRCUIT_BREAKER_THRESHOLD", "7")
+	t.Setenv("RFC2136_PORT", "5353")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.DefaultTTL != 1800 || cfg.MinTTL != 120 {
+		t.Fatalf("ttl: %+v", cfg)
+	}
+	if cfg.AxfrTimeout != 10*time.Second || cfg.UpdateTimeout != 5*time.Second {
+		t.Fatalf("timeouts: %+v", cfg)
+	}
+	if cfg.CircuitBreakerThreshold != 7 {
+		t.Fatalf("threshold: %d", cfg.CircuitBreakerThreshold)
+	}
+	if cfg.Port != 5353 {
+		t.Fatalf("port: %d", cfg.Port)
+	}
+}
+
+func TestLoad_TTLDefaults(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.DefaultTTL != 3600 || cfg.MinTTL != 60 || cfg.Port != 53 ||
+		cfg.AxfrTimeout != 30*time.Second || cfg.UpdateTimeout != 15*time.Second ||
+		cfg.CircuitBreakerThreshold != 3 {
+		t.Fatalf("defaults: %+v", cfg)
+	}
+}
+
+func TestLoad_OwnershipLabelComposed(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("PROJECT_LABEL", "my-op")
+	t.Setenv("INSTANCE_ID", "42")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.OwnershipLabel != "my-op:42" {
+		t.Fatalf("OwnershipLabel: %q", cfg.OwnershipLabel)
+	}
+}
+
+func TestLoad_OwnershipLabelDefault(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.OwnershipLabel != "docker-dns-operator:1" {
+		t.Fatalf("OwnershipLabel default: %q", cfg.OwnershipLabel)
+	}
+}
+
+func TestLoad_HostsMissing(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error when RFC2136_HOSTS missing")
+	}
+}
+
+func TestLoad_ZonesMissing(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error when RFC2136_ZONES missing")
 	}
 }
