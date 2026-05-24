@@ -62,10 +62,12 @@ type Config struct {
 	AxfrTimeout time.Duration
 	// UpdateTimeout bounds a single UPDATE exchange (dial+write+read).
 	UpdateTimeout time.Duration
-	// OwnershipLabel is "<PROJECT_LABEL>:<INSTANCE_ID>" — the value the
-	// ownership-TXT records carry. Reads default to "docker-dns-operator:1".
-	OwnershipLabel string
 }
+
+// The sidecar is intentionally ownership-agnostic. It does NOT read
+// PROJECT_LABEL or INSTANCE_ID — those are operator-side concepts. The
+// operator stamps Labels["owner"] on every Endpoint it sends, and the
+// sidecar round-trips that value through the ownership-TXT sibling.
 
 func Load() (Config, error) {
 	refresh, err := parseDuration("RFC2136_KINIT_REFRESH_INTERVAL", 12*time.Hour)
@@ -110,9 +112,6 @@ func Load() (Config, error) {
 	}
 	domainFilter := parseDomainFilter(os.Getenv("RFC2136_DOMAIN_FILTER"))
 
-	projectLabel := envOr("PROJECT_LABEL", "docker-dns-operator")
-	instanceID := envOr("INSTANCE_ID", "1")
-
 	c := Config{
 		Listen:                  envOr("WEBHOOK_LISTEN", ":9090"),
 		Realm:                   os.Getenv("RFC2136_KERBEROS_REALM"),
@@ -132,7 +131,6 @@ func Load() (Config, error) {
 		DomainFilter:            domainFilter,
 		AxfrTimeout:             axfrTimeout,
 		UpdateTimeout:           updateTimeout,
-		OwnershipLabel:          projectLabel + ":" + instanceID,
 	}
 	if c.Realm == "" {
 		return c, errors.New("RFC2136_KERBEROS_REALM is required")

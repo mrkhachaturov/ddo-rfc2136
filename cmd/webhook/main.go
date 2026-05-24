@@ -79,7 +79,6 @@ func main() {
 		MinTTL:                  cfg.MinTTL,
 		CircuitBreakerThreshold: cfg.CircuitBreakerThreshold,
 		DomainFilter:            cfg.DomainFilter,
-		OwnershipLabel:          cfg.OwnershipLabel,
 		DryRun:                  cfg.DryRun,
 	}, client)
 

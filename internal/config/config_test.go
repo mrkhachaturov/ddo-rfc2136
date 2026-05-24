@@ -406,29 +406,16 @@ func TestLoad_TTLDefaults(t *testing.T) {
 	}
 }
 
-func TestLoad_OwnershipLabelComposed(t *testing.T) {
+// PROJECT_LABEL and INSTANCE_ID are deliberately NOT read by the sidecar
+// — ownership is operator-side. Verify the sidecar starts cleanly even
+// when those env vars are present (i.e. they're treated as inert).
+func TestLoad_IgnoresProjectLabelAndInstanceID(t *testing.T) {
 	os.Clearenv()
 	withRequiredEnv(t)
 	t.Setenv("PROJECT_LABEL", "my-op")
 	t.Setenv("INSTANCE_ID", "42")
-	cfg, err := Load()
-	if err != nil {
+	if _, err := Load(); err != nil {
 		t.Fatalf("unexpected: %v", err)
-	}
-	if cfg.OwnershipLabel != "my-op:42" {
-		t.Fatalf("OwnershipLabel: %q", cfg.OwnershipLabel)
-	}
-}
-
-func TestLoad_OwnershipLabelDefault(t *testing.T) {
-	os.Clearenv()
-	withRequiredEnv(t)
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if cfg.OwnershipLabel != "docker-dns-operator:1" {
-		t.Fatalf("OwnershipLabel default: %q", cfg.OwnershipLabel)
 	}
 }
 

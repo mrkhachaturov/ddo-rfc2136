@@ -22,6 +22,12 @@ import (
 )
 
 // Options configures an Orchestrator. All fields are required.
+//
+// Note: there is no ownership-label field here. The sidecar is
+// ownership-agnostic — it round-trips whatever value the caller stamps
+// on Labels["owner"] of each Endpoint through the persistent TXT
+// sibling, and surfaces it back on ListRecords. The caller (operator)
+// owns the identity concept; the sidecar is a dumb passthrough.
 type Options struct {
 	Hosts                   []string
 	Port                    int
@@ -31,7 +37,6 @@ type Options struct {
 	MinTTL                  int64
 	CircuitBreakerThreshold int
 	DomainFilter            []string
-	OwnershipLabel          string
 	DryRun                  bool
 }
 
@@ -118,7 +123,6 @@ func (o *Orchestrator) ListRecords(ctx context.Context) ([]*Endpoint, error) {
 	dcsSucceeded := map[string]struct{}{}
 
 	out := []*Endpoint{}
-	ownershipValue := o.ownershipValue()
 
 	for _, zone := range o.opts.Zones {
 		recs, dc, err := o.axfrZone(ctx, zone, availableDCs, dcsTried)
@@ -131,7 +135,7 @@ func (o *Orchestrator) ListRecords(ctx context.Context) ([]*Endpoint, error) {
 		o.pins.Set(zone, dc)
 		o.cache.Put(zone, recs)
 
-		out = append(out, o.endpointsFromRecords(recs, zone, ownershipValue)...)
+		out = append(out, o.endpointsFromRecords(recs, zone)...)
 	}
 
 	// Update breaker bookkeeping: anything tried but not succeeded counts
@@ -288,14 +292,19 @@ func (o *Orchestrator) buildZoneChangeSet(zone string, creates, updOld, updNew, 
 	cached, _ := o.cache.Get(zone)
 	cachedByName := indexByName(cached)
 	orphanOwnership := o.orphanOwnership(cached)
-	ownershipValue := o.ownershipValue()
 
 	var cs zoneChangeSet
 
 	for _, e := range creates {
+		owner, ok := ownerFromEndpoint(e)
+		if !ok {
+			log.Printf("orchestrator: skip create %s — Labels[\"owner\"] missing on payload", e.DNSName)
+			continue
+		}
+		ownerTxt := encodeOwnership(owner)
 		for _, recs := range o.endpointToRecords(e) {
 			if o.opts.AxfrEnabled {
-				if reason := o.collisionReason(cachedByName, recs, ownershipValue); reason != "" {
+				if reason := o.collisionReason(cachedByName, recs, owner); reason != "" {
 					log.Printf("orchestrator: skip create %s/%s — collision: %s", recs.Name, recs.Type, reason)
 					continue
 				}
@@ -314,7 +323,7 @@ func (o *Orchestrator) buildZoneChangeSet(zone string, creates, updOld, updNew, 
 						Name:  ownershipName,
 						Type:  "TXT",
 						TTL:   recs.TTL,
-						Value: ownershipValue,
+						Value: ownerTxt,
 					},
 				})
 			}
@@ -322,14 +331,22 @@ func (o *Orchestrator) buildZoneChangeSet(zone string, creates, updOld, updNew, 
 	}
 
 	for i := range updOld {
+		owner, ok := ownerFromEndpoint(updOld[i])
+		if !ok {
+			log.Printf("orchestrator: skip update %s — Labels[\"owner\"] missing on updateOld payload", updOld[i].DNSName)
+			continue
+		}
+		ownerTxt := encodeOwnership(owner)
 		oldRecs := o.endpointToRecords(updOld[i])
 		newRecs := o.endpointToRecords(updNew[i])
 		// Pair by type: external-dns updates always preserve type. We
-		// generate a delete-old/add-new per record.
+		// generate a delete-old/add-new per record. YXRRSET prereq on
+		// the ownership TXT ensures we won't update a record we don't
+		// own (and won't update on behalf of a different owner).
 		for _, oldR := range oldRecs {
 			ownershipName := ownershipNameFor(oldR.Type, oldR.Name)
 			cs.prereqs = append(cs.prereqs, dnsop.Prereq{
-				Kind: "YXRRSET", Name: ownershipName, Type: "TXT", Value: ownershipValue,
+				Kind: "YXRRSET", Name: ownershipName, Type: "TXT", Value: ownerTxt,
 			})
 			cs.changes = append(cs.changes, dnsop.Change{Op: "delete", Record: oldR})
 		}
@@ -339,10 +356,16 @@ func (o *Orchestrator) buildZoneChangeSet(zone string, creates, updOld, updNew, 
 	}
 
 	for _, e := range dels {
+		owner, ok := ownerFromEndpoint(e)
+		if !ok {
+			log.Printf("orchestrator: skip delete %s — Labels[\"owner\"] missing on payload", e.DNSName)
+			continue
+		}
+		ownerTxt := encodeOwnership(owner)
 		for _, r := range o.endpointToRecords(e) {
 			ownershipName := ownershipNameFor(r.Type, r.Name)
 			cs.prereqs = append(cs.prereqs, dnsop.Prereq{
-				Kind: "YXRRSET", Name: ownershipName, Type: "TXT", Value: ownershipValue,
+				Kind: "YXRRSET", Name: ownershipName, Type: "TXT", Value: ownerTxt,
 			})
 			cs.changes = append(cs.changes, dnsop.Change{Op: "delete", Record: r})
 			cs.changes = append(cs.changes, dnsop.Change{
@@ -351,7 +374,7 @@ func (o *Orchestrator) buildZoneChangeSet(zone string, creates, updOld, updNew, 
 					Name:  ownershipName,
 					Type:  "TXT",
 					TTL:   0,
-					Value: ownershipValue,
+					Value: ownerTxt,
 				},
 			})
 		}
@@ -479,8 +502,40 @@ func normalizeName(fqdn string) string {
 	return strings.ToLower(strings.TrimSuffix(fqdn, "."))
 }
 
-func (o *Orchestrator) ownershipValue() string {
-	return `"owned-by=` + o.opts.OwnershipLabel + `"`
+// encodeOwnership wraps an owner label string into the canonical
+// zone-file form that lands in the TXT record's Value field.
+// Example: encodeOwnership("docker-dns-operator:home") -> `"owned-by=docker-dns-operator:home"`
+//
+// The surrounding quotes come from how the dnsop layer parses AXFR
+// (txt.Txt joined and bracketed) — both sides must agree byte-for-byte
+// or owner detection breaks silently.
+func encodeOwnership(label string) string {
+	return `"owned-by=` + label + `"`
+}
+
+// decodeOwnership inverts encodeOwnership. Returns (label, true) when
+// the TXT value carries our `owned-by=...` marker, ("", false) otherwise.
+func decodeOwnership(txtValue string) (string, bool) {
+	const prefix = `"owned-by=`
+	const suffix = `"`
+	if !strings.HasPrefix(txtValue, prefix) || !strings.HasSuffix(txtValue, suffix) {
+		return "", false
+	}
+	return txtValue[len(prefix) : len(txtValue)-len(suffix)], true
+}
+
+// ownerFromEndpoint pulls Labels["owner"] off an Endpoint. Returns
+// ("", false) when missing/empty — callers treat that as a contract
+// violation by the caller (operator must always stamp it).
+func ownerFromEndpoint(e *Endpoint) (string, bool) {
+	if e == nil || e.Labels == nil {
+		return "", false
+	}
+	v, ok := e.Labels["owner"]
+	if !ok || v == "" {
+		return "", false
+	}
+	return v, true
 }
 
 func ownershipNameFor(recType, name string) string {
@@ -496,20 +551,23 @@ func indexByName(recs []dnsop.Record) map[string][]dnsop.Record {
 	return out
 }
 
-// orphanOwnership returns the set of ownership-TXT names we own that have
-// no matching sibling data record (e.g. a previous delete crashed between
-// the data-record delete and the TXT delete). Callers tolerate these by
-// skipping the NXRRSET prereq on the TXT for subsequent creates.
+// orphanOwnership returns the set of ownership-TXT names that have no
+// matching sibling data record (e.g. a previous delete crashed between
+// the data-record delete and the TXT delete). Owner-agnostic: any
+// "ddo-<type>.<name>" TXT carrying the owned-by= form counts. Callers
+// tolerate these by skipping the NXRRSET prereq on the TXT for
+// subsequent creates so a stale TXT doesn't block a fresh create.
 func (o *Orchestrator) orphanOwnership(recs []dnsop.Record) map[string]bool {
-	ownershipValue := o.ownershipValue()
 	byName := indexByName(recs)
 	orphans := map[string]bool{}
 	for _, r := range recs {
-		if r.Type != "TXT" || r.Value != ownershipValue {
+		if r.Type != "TXT" {
+			continue
+		}
+		if _, ok := decodeOwnership(r.Value); !ok {
 			continue
 		}
 		nm := normalizeName(r.Name)
-		// "ddo-<type>.<datast-name>" — split the leftmost label.
 		if !strings.HasPrefix(nm, "ddo-") {
 			continue
 		}
@@ -538,8 +596,14 @@ func (o *Orchestrator) orphanOwnership(recs []dnsop.Record) map[string]bool {
 
 // collisionReason returns a non-empty string when proposing `r` at its
 // name+type would violate RFC1034 §3.6.2 (CNAME mutual exclusion) or
-// would overwrite an existing record we don't own.
-func (o *Orchestrator) collisionReason(cachedByName map[string][]dnsop.Record, r dnsop.Record, ownershipValue string) string {
+// would overwrite an existing record owned by someone OTHER than the
+// requested owner.
+//
+// `requestOwner` is the owner label from the incoming Endpoint payload.
+// If an existing same-type record's ownership-TXT carries a different
+// owner, we refuse to overwrite — that record belongs to a different
+// operator instance.
+func (o *Orchestrator) collisionReason(cachedByName map[string][]dnsop.Record, r dnsop.Record, requestOwner string) string {
 	name := normalizeName(r.Name)
 	sameName := cachedByName[name]
 	hasCname := false
@@ -563,18 +627,28 @@ func (o *Orchestrator) collisionReason(cachedByName map[string][]dnsop.Record, r
 		return "RFC1034 §3.6.2: CNAME at name forbids other types"
 	}
 	if existingSameType != nil {
-		// Already exists at same type. Allowed only if we own it.
+		// Record exists at same type. Find its owner via the sibling TXT.
 		ownershipName := ownershipNameFor(r.Type, r.Name)
-		owned := false
+		existingOwner := ""
 		for _, s := range cachedByName[ownershipName] {
-			if s.Type == "TXT" && s.Value == ownershipValue {
-				owned = true
+			if s.Type != "TXT" {
+				continue
+			}
+			if owner, ok := decodeOwnership(s.Value); ok {
+				existingOwner = owner
 				break
 			}
 		}
-		if !owned {
-			return fmt.Sprintf("existing unowned %s record at %s", r.Type, r.Name)
+		switch {
+		case existingOwner == "":
+			return fmt.Sprintf("existing unmanaged %s record at %s", r.Type, r.Name)
+		case existingOwner != requestOwner:
+			return fmt.Sprintf("existing %s record at %s is owned by %q (request owner %q)", r.Type, r.Name, existingOwner, requestOwner)
 		}
+		// existingOwner == requestOwner: this operator owns it — let
+		// the NXRRSET prereq in the calling create handle the
+		// already-exists case, or it'll be a no-op update path
+		// elsewhere.
 	}
 	return ""
 }
@@ -651,15 +725,28 @@ func canonicalRdata(rtype, target string) string {
 	return ""
 }
 
-// endpointsFromRecords reconstructs Endpoints from a flat record list by
-// grouping by (name, type) and keeping only those with an ownership-TXT
-// sibling carrying our owned-by= label. Each returned Endpoint has
-// Labels["owner"] populated.
-func (o *Orchestrator) endpointsFromRecords(recs []dnsop.Record, zone, ownershipValue string) []*Endpoint {
-	// Build (name -> set-of-owned-types) index from ownership TXTs we wrote.
-	ownedTypes := map[string]map[string]bool{}
+// endpointsFromRecords reconstructs Endpoints from a flat record list.
+//
+// It scans every "ddo-<type>.<name>" TXT sibling whose value matches the
+// `owned-by=…` form, extracts the owner label verbatim from the TXT, and
+// stamps it back onto the corresponding data Endpoint's Labels["owner"].
+// Records WITHOUT an ownership TXT sibling are NOT returned — they aren't
+// operator-managed in any sense the sidecar can vouch for.
+//
+// Crucially, the sidecar does NOT filter by a specific owner value. It
+// surfaces every managed record with whatever owner the TXT carries. The
+// operator-side WebhookProvider filters client-side by comparing
+// Labels["owner"] to its own ownershipLabel, so two operators talking to
+// the same backend each see only their own records.
+func (o *Orchestrator) endpointsFromRecords(recs []dnsop.Record, zone string) []*Endpoint {
+	// Build (name -> {type -> ownerLabel}) from ownership TXTs.
+	ownedTypes := map[string]map[string]string{}
 	for _, r := range recs {
-		if r.Type != "TXT" || r.Value != ownershipValue {
+		if r.Type != "TXT" {
+			continue
+		}
+		owner, ok := decodeOwnership(r.Value)
+		if !ok {
 			continue
 		}
 		nm := normalizeName(r.Name)
@@ -672,15 +759,16 @@ func (o *Orchestrator) endpointsFromRecords(recs []dnsop.Record, zone, ownership
 		}
 		typeLc := nm[len("ddo-"):dot]
 		dataName := nm[dot+1:]
-		set, ok := ownedTypes[dataName]
+		byType, ok := ownedTypes[dataName]
 		if !ok {
-			set = map[string]bool{}
-			ownedTypes[dataName] = set
+			byType = map[string]string{}
+			ownedTypes[dataName] = byType
 		}
-		set[strings.ToUpper(typeLc)] = true
+		byType[strings.ToUpper(typeLc)] = owner
 	}
 
-	// Group data records by (name, type) → []targets. Skip non-managed ones.
+	// Group data records by (name, type) → []targets. Only emit those
+	// with a matching ownership TXT.
 	type key struct{ name, rtype string }
 	bucketRecs := map[key]*Endpoint{}
 	var order []key
@@ -692,8 +780,12 @@ func (o *Orchestrator) endpointsFromRecords(recs []dnsop.Record, zone, ownership
 			continue
 		}
 		name := normalizeName(r.Name)
-		types, ok := ownedTypes[name]
-		if !ok || !types[r.Type] {
+		ownerByType, ok := ownedTypes[name]
+		if !ok {
+			continue
+		}
+		owner, ok := ownerByType[r.Type]
+		if !ok {
 			continue
 		}
 		k := key{name, r.Type}
@@ -704,7 +796,7 @@ func (o *Orchestrator) endpointsFromRecords(recs []dnsop.Record, zone, ownership
 				RecordType: r.Type,
 				RecordTTL:  int64(r.TTL),
 				Labels: map[string]string{
-					"owner":    o.opts.OwnershipLabel,
+					"owner":    owner,
 					"resource": "rfc2136/" + zone,
 				},
 			}

@@ -67,8 +67,14 @@ func defaultOpts() Options {
 		DefaultTTL:              3600,
 		MinTTL:                  60,
 		CircuitBreakerThreshold: 3,
-		OwnershipLabel:          "docker-dns-operator:1",
 	}
+}
+
+// defaultOwnerLabels returns the canonical operator-supplied labels for
+// payload Endpoints in tests. Tests that need a different owner pass
+// their own map.
+func defaultOwnerLabels() map[string]string {
+	return map[string]string{"owner": "docker-dns-operator:1"}
 }
 
 func ownershipRecord(name, dataType, label string) dnsop.Record {
@@ -82,16 +88,21 @@ func ownershipRecord(name, dataType, label string) dnsop.Record {
 
 // -- ListRecords -----------------------------------------------------------
 
-func TestListRecords_OnlyOwnedRecordsEmitted(t *testing.T) {
+// The sidecar surfaces every record that has an ownership-TXT sibling,
+// regardless of which owner the TXT carries. The Labels["owner"] on each
+// returned Endpoint reflects the value persisted in the TXT verbatim, so
+// the operator can filter client-side. Unmanaged records (no TXT) are
+// excluded — the sidecar can't vouch for them.
+func TestListRecords_RoundTripsOwnerFromTxt(t *testing.T) {
 	fc := newFakeClient()
 	fc.axfrByDCZone["dc01.corp.example.com|corp.example.com"] = dnsop.RecordsResult{
 		OK: true,
 		Records: []dnsop.Record{
-			{Name: "owned.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.1"},
-			ownershipRecord("owned.corp.example.com", "A", "docker-dns-operator:1"),
-			{Name: "unowned.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.2"},
-			{Name: "owned-by-other.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.3"},
-			ownershipRecord("owned-by-other.corp.example.com", "A", "other-op:1"),
+			{Name: "owned-by-home.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.1"},
+			ownershipRecord("owned-by-home.corp.example.com", "A", "docker-dns-operator:home"),
+			{Name: "unmanaged.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.2"},
+			{Name: "owned-by-office.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.3"},
+			ownershipRecord("owned-by-office.corp.example.com", "A", "docker-dns-operator:office"),
 		},
 	}
 	o := New(defaultOpts(), fc)
@@ -99,11 +110,21 @@ func TestListRecords_OnlyOwnedRecordsEmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListRecords: %v", err)
 	}
-	if len(eps) != 1 {
-		t.Fatalf("expected exactly 1 endpoint, got %d: %+v", len(eps), eps)
+	if len(eps) != 2 {
+		t.Fatalf("expected 2 endpoints (managed only, both owners), got %d: %+v", len(eps), eps)
 	}
-	if eps[0].DNSName != "owned.corp.example.com" || eps[0].Labels["owner"] != "docker-dns-operator:1" {
-		t.Fatalf("bad endpoint: %+v", eps[0])
+	byName := map[string]*Endpoint{}
+	for _, ep := range eps {
+		byName[ep.DNSName] = ep
+	}
+	if home := byName["owned-by-home.corp.example.com"]; home == nil || home.Labels["owner"] != "docker-dns-operator:home" {
+		t.Fatalf("home endpoint missing/wrong owner: %+v", home)
+	}
+	if office := byName["owned-by-office.corp.example.com"]; office == nil || office.Labels["owner"] != "docker-dns-operator:office" {
+		t.Fatalf("office endpoint missing/wrong owner: %+v", office)
+	}
+	if _, leaked := byName["unmanaged.corp.example.com"]; leaked {
+		t.Fatalf("unmanaged record must NOT be returned")
 	}
 }
 
@@ -179,6 +200,7 @@ func TestApplyChanges_CreateBuildsOwnershipTxt(t *testing.T) {
 	err := o.ApplyChanges(context.Background(), Changes{
 		Create: []*Endpoint{{
 			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			Labels: defaultOwnerLabels(),
 		}},
 	})
 	if err != nil {
@@ -194,7 +216,8 @@ func TestApplyChanges_CreateBuildsOwnershipTxt(t *testing.T) {
 	if len(c.changes) != 2 {
 		t.Fatalf("expected 2 changes (data + TXT), got %+v", c.changes)
 	}
-	// One of the changes must be the ownership TXT.
+	// One of the changes must be the ownership TXT carrying the
+	// payload-supplied owner verbatim — NOT a sidecar-side default.
 	sawTxt := false
 	for _, ch := range c.changes {
 		if ch.Record.Type == "TXT" && strings.HasPrefix(ch.Record.Name, "ddo-a.") {
@@ -206,6 +229,52 @@ func TestApplyChanges_CreateBuildsOwnershipTxt(t *testing.T) {
 	}
 	if !sawTxt {
 		t.Fatalf("missing ownership txt change in %+v", c.changes)
+	}
+}
+
+// Sidecar is ownership-agnostic — whatever owner label arrives in the
+// payload is what gets written into the TXT. Two operators with
+// different INSTANCE_IDs talking to the same sidecar coexist cleanly.
+func TestApplyChanges_CreateHonorsOwnerFromPayload(t *testing.T) {
+	fc := newFakeClient()
+	o := New(defaultOpts(), fc)
+	_, _ = o.ListRecords(context.Background())
+	if err := o.ApplyChanges(context.Background(), Changes{
+		Create: []*Endpoint{{
+			DNSName: "office.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.1.5"},
+			Labels: map[string]string{"owner": "docker-dns-operator:office"},
+		}},
+	}); err != nil {
+		t.Fatalf("ApplyChanges: %v", err)
+	}
+	c := fc.updateCalls[0]
+	for _, ch := range c.changes {
+		if ch.Record.Type == "TXT" {
+			if ch.Record.Value != `"owned-by=docker-dns-operator:office"` {
+				t.Fatalf("ownership txt did not use payload owner: %q", ch.Record.Value)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected an ownership TXT change, got %+v", c.changes)
+}
+
+// Missing Labels["owner"] on the payload = caller contract violation;
+// the sidecar logs and skips rather than guessing.
+func TestApplyChanges_CreateSkippedOnMissingOwnerLabel(t *testing.T) {
+	fc := newFakeClient()
+	o := New(defaultOpts(), fc)
+	_, _ = o.ListRecords(context.Background())
+	if err := o.ApplyChanges(context.Background(), Changes{
+		Create: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			// Labels intentionally nil
+		}},
+	}); err != nil {
+		t.Fatalf("ApplyChanges: %v", err)
+	}
+	if len(fc.updateCalls) != 0 {
+		t.Fatalf("create with missing owner label must be skipped, got %d UPDATEs", len(fc.updateCalls))
 	}
 }
 
@@ -223,7 +292,10 @@ func TestApplyChanges_CreateSkipsTxtPrereqOnOrphan(t *testing.T) {
 		t.Fatalf("prime: %v", err)
 	}
 	if err := o.ApplyChanges(context.Background(), Changes{
-		Create: []*Endpoint{{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"}}},
+		Create: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			Labels: defaultOwnerLabels(),
+		}},
 	}); err != nil {
 		t.Fatalf("ApplyChanges: %v", err)
 	}
@@ -253,7 +325,10 @@ func TestApplyChanges_CreateSkippedOnCnameCollision(t *testing.T) {
 		t.Fatalf("prime: %v", err)
 	}
 	if err := o.ApplyChanges(context.Background(), Changes{
-		Create: []*Endpoint{{DNSName: "app.corp.example.com", RecordType: "CNAME", RecordTTL: 300, Targets: []string{"target.corp.example.com"}}},
+		Create: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "CNAME", RecordTTL: 300, Targets: []string{"target.corp.example.com"},
+			Labels: defaultOwnerLabels(),
+		}},
 	}); err != nil {
 		t.Fatalf("ApplyChanges: %v", err)
 	}
@@ -262,9 +337,9 @@ func TestApplyChanges_CreateSkippedOnCnameCollision(t *testing.T) {
 	}
 }
 
-func TestApplyChanges_CreateSkippedOnUnownedSameType(t *testing.T) {
+func TestApplyChanges_CreateSkippedOnUnmanagedSameType(t *testing.T) {
 	fc := newFakeClient()
-	// Existing A record at the name with no ownership TXT — collision.
+	// Existing A record at the name with no ownership TXT — unmanaged collision.
 	fc.axfrByDCZone["dc01.corp.example.com|corp.example.com"] = dnsop.RecordsResult{
 		OK: true,
 		Records: []dnsop.Record{
@@ -276,12 +351,46 @@ func TestApplyChanges_CreateSkippedOnUnownedSameType(t *testing.T) {
 		t.Fatalf("prime: %v", err)
 	}
 	if err := o.ApplyChanges(context.Background(), Changes{
-		Create: []*Endpoint{{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"}}},
+		Create: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			Labels: defaultOwnerLabels(),
+		}},
 	}); err != nil {
 		t.Fatalf("ApplyChanges: %v", err)
 	}
 	if len(fc.updateCalls) != 0 {
-		t.Fatalf("expected NO UPDATE on unowned same-type collision, got %d", len(fc.updateCalls))
+		t.Fatalf("expected NO UPDATE on unmanaged same-type collision, got %d", len(fc.updateCalls))
+	}
+}
+
+// Two operators talking to the same backend: the sidecar must refuse a
+// create from operator-B at a name already owned by operator-A.
+// The operator-side filter wouldn't have shown the record to B
+// (different owner), so B's reconciler tries to "create" it, and the
+// sidecar's collision check is the safety net.
+func TestApplyChanges_CreateSkippedOnDifferentOwnerCollision(t *testing.T) {
+	fc := newFakeClient()
+	fc.axfrByDCZone["dc01.corp.example.com|corp.example.com"] = dnsop.RecordsResult{
+		OK: true,
+		Records: []dnsop.Record{
+			{Name: "app.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.1"},
+			ownershipRecord("app.corp.example.com", "A", "docker-dns-operator:home"),
+		},
+	}
+	o := New(defaultOpts(), fc)
+	if _, err := o.ListRecords(context.Background()); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	if err := o.ApplyChanges(context.Background(), Changes{
+		Create: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.1.1"},
+			Labels: map[string]string{"owner": "docker-dns-operator:office"},
+		}},
+	}); err != nil {
+		t.Fatalf("ApplyChanges: %v", err)
+	}
+	if len(fc.updateCalls) != 0 {
+		t.Fatalf("create with different-owner collision must be skipped, got %d UPDATEs", len(fc.updateCalls))
 	}
 }
 
@@ -292,13 +401,20 @@ func TestApplyChanges_DeleteIncludesTxtPrereqAndDelete(t *testing.T) {
 		t.Fatalf("prime: %v", err)
 	}
 	if err := o.ApplyChanges(context.Background(), Changes{
-		Delete: []*Endpoint{{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"}}},
+		Delete: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			Labels: defaultOwnerLabels(),
+		}},
 	}); err != nil {
 		t.Fatalf("ApplyChanges: %v", err)
 	}
 	c := fc.updateCalls[0]
 	if len(c.prereqs) != 1 || c.prereqs[0].Kind != "YXRRSET" {
 		t.Fatalf("expected single YXRRSET prereq, got %+v", c.prereqs)
+	}
+	// YXRRSET prereq value MUST be the payload owner — not a sidecar default.
+	if c.prereqs[0].Value != `"owned-by=docker-dns-operator:1"` {
+		t.Fatalf("YXRRSET prereq value %q does not match payload owner", c.prereqs[0].Value)
 	}
 	if len(c.changes) != 2 {
 		t.Fatalf("expected delete-data + delete-TXT, got %+v", c.changes)
@@ -311,8 +427,14 @@ func TestApplyChanges_UpdateKeepsTxtUntouched(t *testing.T) {
 	if _, err := o.ListRecords(context.Background()); err != nil {
 		t.Fatalf("prime: %v", err)
 	}
-	old := &Endpoint{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.1"}}
-	upd := &Endpoint{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.2"}}
+	old := &Endpoint{
+		DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.1"},
+		Labels: defaultOwnerLabels(),
+	}
+	upd := &Endpoint{
+		DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.2"},
+		Labels: defaultOwnerLabels(),
+	}
 	if err := o.ApplyChanges(context.Background(), Changes{
 		UpdateOld: []*Endpoint{old},
 		UpdateNew: []*Endpoint{upd},
@@ -341,7 +463,10 @@ func TestApplyChanges_DomainFilterSkips(t *testing.T) {
 	o := New(opts, fc)
 	_, _ = o.ListRecords(context.Background())
 	if err := o.ApplyChanges(context.Background(), Changes{
-		Create: []*Endpoint{{DNSName: "outside.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.1"}}},
+		Create: []*Endpoint{{
+			DNSName: "outside.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.1"},
+			Labels: defaultOwnerLabels(),
+		}},
 	}); err != nil {
 		t.Fatalf("ApplyChanges: %v", err)
 	}
@@ -354,7 +479,10 @@ func TestApplyChanges_NoMatchingZoneSkips(t *testing.T) {
 	fc := newFakeClient()
 	o := New(defaultOpts(), fc)
 	if err := o.ApplyChanges(context.Background(), Changes{
-		Create: []*Endpoint{{DNSName: "host.other.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.1"}}},
+		Create: []*Endpoint{{
+			DNSName: "host.other.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.1"},
+			Labels: defaultOwnerLabels(),
+		}},
 	}); err != nil {
 		t.Fatalf("ApplyChanges: %v", err)
 	}
@@ -370,7 +498,10 @@ func TestApplyChanges_DryRunSkipsUpdate(t *testing.T) {
 	o := New(opts, fc)
 	_, _ = o.ListRecords(context.Background())
 	if err := o.ApplyChanges(context.Background(), Changes{
-		Create: []*Endpoint{{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"}}},
+		Create: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			Labels: defaultOwnerLabels(),
+		}},
 	}); err != nil {
 		t.Fatalf("ApplyChanges: %v", err)
 	}
@@ -387,7 +518,10 @@ func TestApplyChanges_FailoverOnRetryable(t *testing.T) {
 	o := New(defaultOpts(), fc)
 	_, _ = o.ListRecords(context.Background())
 	if err := o.ApplyChanges(context.Background(), Changes{
-		Create: []*Endpoint{{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"}}},
+		Create: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			Labels: defaultOwnerLabels(),
+		}},
 	}); err != nil {
 		t.Fatalf("ApplyChanges: %v", err)
 	}
@@ -409,7 +543,10 @@ func TestApplyChanges_NoFailoverOnNonRetryable(t *testing.T) {
 	o := New(defaultOpts(), fc)
 	_, _ = o.ListRecords(context.Background())
 	err := o.ApplyChanges(context.Background(), Changes{
-		Create: []*Endpoint{{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"}}},
+		Create: []*Endpoint{{
+			DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			Labels: defaultOwnerLabels(),
+		}},
 	})
 	if err == nil {
 		t.Fatalf("expected error on non-retryable failure")
