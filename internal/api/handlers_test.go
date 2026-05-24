@@ -2,94 +2,158 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/mrkhachaturov/ddo-rfc2136/internal/dnsop"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/orchestrator"
 	"github.com/mrkhachaturov/ddo-rfc2136/internal/state"
 )
 
-type fakeClient struct {
-	axfrResult   dnsop.RecordsResult
-	updateResult dnsop.ApplyResult
-	lastAxfr     dnsop.RecordsResult
-	lastUpdate   dnsop.ApplyResult
-	calls        []string
+// fakeProvider is the test seam for the orchestrator surface.
+type fakeProvider struct {
+	zones       []string
+	records     []*orchestrator.Endpoint
+	listErr     error
+	applyErr    error
+	lastApplied orchestrator.Changes
+	applyCalls  int
 }
 
-func (f *fakeClient) AXFR(host string, port int, zone string) dnsop.RecordsResult {
-	f.calls = append(f.calls, "AXFR:"+host+":"+zone)
-	return f.axfrResult
+func (f *fakeProvider) Zones() []string { return f.zones }
+
+func (f *fakeProvider) ListRecords(_ context.Context) ([]*orchestrator.Endpoint, error) {
+	return f.records, f.listErr
 }
 
-func (f *fakeClient) Update(host string, port int, zone string, prereqs []dnsop.Prereq, changes []dnsop.Change) dnsop.ApplyResult {
-	f.calls = append(f.calls, "UPDATE:"+host+":"+zone)
-	return f.updateResult
+func (f *fakeProvider) ApplyChanges(_ context.Context, ch orchestrator.Changes) error {
+	f.applyCalls++
+	f.lastApplied = ch
+	return f.applyErr
 }
 
-func TestRecordsHandler_OK(t *testing.T) {
-	fc := &fakeClient{axfrResult: dnsop.RecordsResult{OK: true, Records: []dnsop.Record{{Name: "a.example.com", Type: "A", TTL: 300, Value: "10.1.2.3"}}}}
-	h := NewHandlers(fc, true)
-	body, _ := json.Marshal(RecordsRequest{Host: "dc01.corp.example.com", Port: 53, Zone: "example.com"})
+func TestNegotiate_ReturnsFiltersFromProvider(t *testing.T) {
+	fp := &fakeProvider{zones: []string{"corp.example.com", "other.example.com"}}
+	h := NewHandlers(fp, nil)
 	rr := httptest.NewRecorder()
-	h.Records(rr, httptest.NewRequest(http.MethodPost, "/v1/records", bytes.NewReader(body)))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-	}
-	var resp dnsop.RecordsResult
-	_ = json.NewDecoder(rr.Body).Decode(&resp)
-	if !resp.OK || len(resp.Records) != 1 {
-		t.Fatalf("bad response: %+v", resp)
-	}
-}
-
-func TestApplyHandler_DryRunSkipsClient(t *testing.T) {
-	fc := &fakeClient{updateResult: dnsop.ApplyResult{OK: true}}
-	h := NewHandlers(fc, true /* dryRun */)
-	body, _ := json.Marshal(ApplyRequest{
-		Host: "dc01.corp.example.com", Port: 53, Zone: "example.com",
-		Changes: []dnsop.Change{{Op: "add", Record: dnsop.Record{Name: "x.example.com", Type: "A", TTL: 300, Value: "10.0.0.1"}}},
-	})
-	rr := httptest.NewRecorder()
-	h.Apply(rr, httptest.NewRequest(http.MethodPost, "/v1/apply", bytes.NewReader(body)))
+	h.Negotiate(rr, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d", rr.Code)
 	}
-	if len(fc.calls) != 0 {
-		t.Fatalf("dry-run must not call client, got %v", fc.calls)
+	if ct := rr.Header().Get("Content-Type"); ct != MediaTypeFormatAndVersion {
+		t.Fatalf("content-type: %q", ct)
+	}
+	var got Filters
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Filters) != 2 || got.Filters[0] != "corp.example.com" {
+		t.Fatalf("filters: %+v", got)
 	}
 }
 
-func TestApplyHandler_PassesPrereqsAndChanges(t *testing.T) {
-	fc := &fakeClient{updateResult: dnsop.ApplyResult{OK: true}}
-	h := NewHandlers(fc, false)
-	req := ApplyRequest{
-		Host: "dc01.corp.example.com", Port: 53, Zone: "example.com",
-		Prerequisites: []dnsop.Prereq{{Kind: "NXRRSET", Name: "x.example.com", Type: "A"}},
-		Changes:       []dnsop.Change{{Op: "add", Record: dnsop.Record{Name: "x.example.com", Type: "A", TTL: 300, Value: "10.0.0.1"}}},
-	}
-	body, _ := json.Marshal(req)
+func TestRecords_ReturnsWireEndpoints(t *testing.T) {
+	fp := &fakeProvider{records: []*orchestrator.Endpoint{
+		{
+			DNSName:    "app.corp.example.com",
+			RecordType: "A",
+			RecordTTL:  300,
+			Targets:    []string{"10.1.2.3"},
+			Labels:     map[string]string{"owner": "docker-dns-operator:1"},
+		},
+	}}
+	h := NewHandlers(fp, nil)
 	rr := httptest.NewRecorder()
-	h.Apply(rr, httptest.NewRequest(http.MethodPost, "/v1/apply", bytes.NewReader(body)))
+	h.Records(rr, httptest.NewRequest(http.MethodGet, "/records", nil))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rr.Code, readAll(rr.Body))
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if len(fc.calls) != 1 || fc.calls[0] != "UPDATE:dc01.corp.example.com:example.com" {
-		t.Fatalf("unexpected calls: %v", fc.calls)
+	var got []*Endpoint
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].DNSName != "app.corp.example.com" || got[0].Labels["owner"] != "docker-dns-operator:1" {
+		t.Fatalf("bad records: %+v", got)
 	}
 }
 
-func readAll(b interface{ Read(p []byte) (int, error) }) string {
-	out, _ := io.ReadAll(b)
-	return string(out)
+func TestRecords_PropagatesProviderError(t *testing.T) {
+	fp := &fakeProvider{listErr: errors.New("axfr unreachable")}
+	h := NewHandlers(fp, nil)
+	rr := httptest.NewRecorder()
+	h.Records(rr, httptest.NewRequest(http.MethodGet, "/records", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d", rr.Code)
+	}
+}
+
+func TestApplyChanges_HappyPathReturns204(t *testing.T) {
+	fp := &fakeProvider{}
+	h := NewHandlers(fp, nil)
+	body, _ := json.Marshal(Changes{
+		Create: []*Endpoint{{DNSName: "app.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.0.0.1"}}},
+	})
+	rr := httptest.NewRecorder()
+	h.ApplyChanges(rr, httptest.NewRequest(http.MethodPost, "/records", bytes.NewReader(body)))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if fp.applyCalls != 1 {
+		t.Fatalf("expected exactly 1 apply call, got %d", fp.applyCalls)
+	}
+	if len(fp.lastApplied.Create) != 1 || fp.lastApplied.Create[0].DNSName != "app.corp.example.com" {
+		t.Fatalf("orchestrator did not see the create: %+v", fp.lastApplied)
+	}
+}
+
+func TestApplyChanges_BadJsonReturns400(t *testing.T) {
+	fp := &fakeProvider{}
+	h := NewHandlers(fp, nil)
+	rr := httptest.NewRecorder()
+	h.ApplyChanges(rr, httptest.NewRequest(http.MethodPost, "/records", strings.NewReader("{not json")))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	if fp.applyCalls != 0 {
+		t.Fatalf("orchestrator must not be called on bad JSON")
+	}
+}
+
+func TestApplyChanges_ProviderErrorReturns500(t *testing.T) {
+	fp := &fakeProvider{applyErr: errors.New("update failed")}
+	h := NewHandlers(fp, nil)
+	body, _ := json.Marshal(Changes{Create: []*Endpoint{{DNSName: "x.corp.example.com", RecordType: "A", Targets: []string{"1.1.1.1"}}}})
+	rr := httptest.NewRecorder()
+	h.ApplyChanges(rr, httptest.NewRequest(http.MethodPost, "/records", bytes.NewReader(body)))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d", rr.Code)
+	}
+}
+
+func TestAdjustEndpoints_EchoesInput(t *testing.T) {
+	fp := &fakeProvider{}
+	h := NewHandlers(fp, nil)
+	in := []*Endpoint{{DNSName: "x.corp.example.com", RecordType: "A", Targets: []string{"1.1.1.1"}}}
+	body, _ := json.Marshal(in)
+	rr := httptest.NewRecorder()
+	h.AdjustEndpoints(rr, httptest.NewRequest(http.MethodPost, "/adjustendpoints", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var got []*Endpoint
+	_ = json.NewDecoder(rr.Body).Decode(&got)
+	if len(got) != 1 || got[0].DNSName != "x.corp.example.com" {
+		t.Fatalf("did not echo input: %+v", got)
+	}
 }
 
 func TestHealthz_NoStateReportsReadyForBackCompat(t *testing.T) {
-	h := NewHandlers(&fakeClient{}, false)
+	h := NewHandlers(&fakeProvider{}, nil)
 	rr := httptest.NewRecorder()
 	h.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rr.Code != http.StatusOK {
@@ -104,32 +168,22 @@ func TestHealthz_NoStateReportsReadyForBackCompat(t *testing.T) {
 
 func TestHealthz_UnknownBeforeFirstRefresh(t *testing.T) {
 	st := state.NewKerberos()
-	h := NewHandlersWithState(&fakeClient{}, false, st)
+	h := NewHandlers(&fakeProvider{}, st)
 	rr := httptest.NewRecorder()
 	h.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d want 503 for unknown state", rr.Code)
-	}
-	var resp HealthResponse
-	_ = json.NewDecoder(rr.Body).Decode(&resp)
-	if resp.OK || resp.Kerberos != "unknown" {
-		t.Fatalf("bad response: %+v", resp)
 	}
 }
 
 func TestHealthz_ReadyReturns200(t *testing.T) {
 	st := state.NewKerberos()
 	st.MarkReady(time.Unix(1700000000, 0))
-	h := NewHandlersWithState(&fakeClient{}, false, st)
+	h := NewHandlers(&fakeProvider{}, st)
 	rr := httptest.NewRecorder()
 	h.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status=%d want 200", rr.Code)
-	}
-	var resp HealthResponse
-	_ = json.NewDecoder(rr.Body).Decode(&resp)
-	if !resp.OK || resp.Kerberos != "ready" || resp.Detail != "" {
-		t.Fatalf("bad response: %+v", resp)
+		t.Fatalf("status=%d", rr.Code)
 	}
 }
 
@@ -137,7 +191,7 @@ func TestHealthz_ExpiredReturns503WithDetail(t *testing.T) {
 	st := state.NewKerberos()
 	st.MarkReady(time.Unix(1700000000, 0))
 	st.MarkExpired("kinit: KDC unreachable")
-	h := NewHandlersWithState(&fakeClient{}, false, st)
+	h := NewHandlers(&fakeProvider{}, st)
 	rr := httptest.NewRecorder()
 	h.Healthz(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rr.Code != http.StatusServiceUnavailable {

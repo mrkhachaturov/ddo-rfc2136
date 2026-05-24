@@ -1,63 +1,85 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 
-	"github.com/mrkhachaturov/ddo-rfc2136/internal/dnsop"
+	"github.com/mrkhachaturov/ddo-rfc2136/internal/orchestrator"
 	"github.com/mrkhachaturov/ddo-rfc2136/internal/state"
 )
 
+// Provider is the orchestrator-facing surface the handler needs. Defined
+// as an interface so tests can fake it without booting the real DNS stack.
+type Provider interface {
+	Zones() []string
+	ListRecords(ctx context.Context) ([]*orchestrator.Endpoint, error)
+	ApplyChanges(ctx context.Context, ch orchestrator.Changes) error
+}
+
+// Handlers owns the four external-dns v1 endpoints plus /healthz.
 type Handlers struct {
-	client dnsop.Client
-	dryRun bool
-	// krb may be nil in tests that don't exercise /healthz, in which case
-	// the handler falls back to reporting "ready" for backward compatibility
-	// with the original health-check contract.
+	provider Provider
+	// krb may be nil in tests; when nil the /healthz handler reports
+	// "ready" unconditionally for back-compat with the original wire.
 	krb *state.Kerberos
 }
 
-func NewHandlers(client dnsop.Client, dryRun bool) *Handlers {
-	return &Handlers{client: client, dryRun: dryRun}
+// NewHandlers wires the orchestrator and Kerberos state into the HTTP
+// surface. Both arguments are optional (krb may be nil in tests).
+func NewHandlers(p Provider, krb *state.Kerberos) *Handlers {
+	return &Handlers{provider: p, krb: krb}
 }
 
-// NewHandlersWithState wires the live Kerberos state container into /healthz
-// so the endpoint reflects whether the background kinit-refresh goroutine is
-// healthy. Use this in production; the simpler NewHandlers stays around for
-// the existing test suite.
-func NewHandlersWithState(client dnsop.Client, dryRun bool, krb *state.Kerberos) *Handlers {
-	return &Handlers{client: client, dryRun: dryRun, krb: krb}
+// Negotiate handles GET / — external-dns calls this first to discover the
+// domain filter we accept records for. The body is `{"filters":["zone1"]}`.
+func (h *Handlers) Negotiate(w http.ResponseWriter, _ *http.Request) {
+	writeWebhookJSON(w, http.StatusOK, Filters{Filters: h.provider.Zones()})
 }
 
+// Records handles GET /records — returns every Endpoint the sidecar manages,
+// reconstructed from the AXFR cache via the ownership-TXT bridge.
 func (h *Handlers) Records(w http.ResponseWriter, r *http.Request) {
-	var req RecordsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, dnsop.RecordsResult{
-			OK: false, Phase: "dns-send", Message: "bad json: " + err.Error(), Retryable: false,
-		})
+	eps, err := h.provider.ListRecords(r.Context())
+	if err != nil {
+		writeWebhookJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	res := h.client.AXFR(req.Host, req.Port, req.Zone)
-	writeJSON(w, http.StatusOK, res)
+	out := make([]*Endpoint, 0, len(eps))
+	for _, e := range eps {
+		out = append(out, toWireEndpoint(e))
+	}
+	writeWebhookJSON(w, http.StatusOK, out)
 }
 
-func (h *Handlers) Apply(w http.ResponseWriter, r *http.Request) {
-	var req ApplyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, dnsop.ApplyResult{
-			OK: false, Phase: "dns-send", Message: "bad json: " + err.Error(), Retryable: false,
-		})
+// ApplyChanges handles POST /records — decodes Changes and forwards to the
+// orchestrator. Success is 204 No Content (external-dns expects the body
+// to be empty on success).
+func (h *Handlers) ApplyChanges(w http.ResponseWriter, r *http.Request) {
+	var wire Changes
+	if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
+		writeWebhookJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
 		return
 	}
-	if h.dryRun {
-		log.Printf("[dry-run] would apply zone=%s changes=%d prereqs=%d",
-			req.Zone, len(req.Changes), len(req.Prerequisites))
-		writeJSON(w, http.StatusOK, dnsop.ApplyResult{OK: true})
+	if err := h.provider.ApplyChanges(r.Context(), toDomainChanges(&wire)); err != nil {
+		writeWebhookJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	res := h.client.Update(req.Host, req.Port, req.Zone, req.Prerequisites, req.Changes)
-	writeJSON(w, http.StatusOK, res)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// AdjustEndpoints handles POST /adjustendpoints — external-dns sometimes
+// calls this between planning and applying to let the provider normalise
+// targets/TTLs. Our normalisation lives inside ApplyChanges, so we echo
+// the input unchanged. Implementing this prevents external-dns from
+// erroring with a 404 when it expects a provider that supports it.
+func (h *Handlers) AdjustEndpoints(w http.ResponseWriter, r *http.Request) {
+	var in []*Endpoint
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeWebhookJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	writeWebhookJSON(w, http.StatusOK, in)
 }
 
 // Healthz reports the current Kerberos refresh state. Status codes:
@@ -66,28 +88,79 @@ func (h *Handlers) Apply(w http.ResponseWriter, r *http.Request) {
 //     refresh has run yet ("unknown"). The sidecar keeps serving so a probe
 //     can drain traffic without killing the container — recovery on the next
 //     refresh tick will flip the response back to 200.
-func (h *Handlers) Healthz(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) Healthz(w http.ResponseWriter, _ *http.Request) {
 	if h.krb == nil {
-		writeJSON(w, http.StatusOK, HealthResponse{
-			OK: true, Kerberos: "ready", Detail: "",
-		})
+		writeWebhookJSON(w, http.StatusOK, HealthResponse{OK: true, Kerberos: "ready"})
 		return
 	}
 	status, detail, _ := h.krb.Snapshot()
 	ok := status == state.StatusReady
-	httpStatus := http.StatusOK
+	code := http.StatusOK
 	if !ok {
-		httpStatus = http.StatusServiceUnavailable
+		code = http.StatusServiceUnavailable
 	}
-	writeJSON(w, httpStatus, HealthResponse{
-		OK:       ok,
-		Kerberos: string(status),
-		Detail:   detail,
-	})
+	writeWebhookJSON(w, code, HealthResponse{OK: ok, Kerberos: string(status), Detail: detail})
 }
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("content-type", "application/json")
+// --- helpers --------------------------------------------------------------
+
+func writeWebhookJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", MediaTypeFormatAndVersion)
+	w.Header().Set("Vary", "Content-Type")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func toDomainChanges(c *Changes) orchestrator.Changes {
+	return orchestrator.Changes{
+		Create:    toDomainEndpoints(c.Create),
+		UpdateOld: toDomainEndpoints(c.UpdateOld),
+		UpdateNew: toDomainEndpoints(c.UpdateNew),
+		Delete:    toDomainEndpoints(c.Delete),
+	}
+}
+
+func toDomainEndpoints(in []*Endpoint) []*orchestrator.Endpoint {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*orchestrator.Endpoint, 0, len(in))
+	for _, e := range in {
+		if e == nil {
+			out = append(out, nil)
+			continue
+		}
+		out = append(out, &orchestrator.Endpoint{
+			DNSName:    e.DNSName,
+			Targets:    append([]string(nil), e.Targets...),
+			RecordType: e.RecordType,
+			RecordTTL:  e.RecordTTL,
+			Labels:     copyLabels(e.Labels),
+		})
+	}
+	return out
+}
+
+func toWireEndpoint(e *orchestrator.Endpoint) *Endpoint {
+	if e == nil {
+		return nil
+	}
+	return &Endpoint{
+		DNSName:    e.DNSName,
+		Targets:    append([]string(nil), e.Targets...),
+		RecordType: e.RecordType,
+		RecordTTL:  e.RecordTTL,
+		Labels:     copyLabels(e.Labels),
+	}
+}
+
+func copyLabels(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
