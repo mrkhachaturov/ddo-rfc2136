@@ -20,15 +20,25 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	log.Printf("rfc2136-webhook listen=%s principal=%s dryRun=%v kinitRefresh=%v",
-		cfg.Listen, cfg.Principal, cfg.DryRun, cfg.KinitRefreshInterval)
+	authMode := "keytab"
+	if cfg.Password != "" {
+		authMode = "password"
+	}
+	log.Printf("rfc2136-webhook listen=%s principal=%s authMode=%s dryRun=%v kinitRefresh=%v",
+		cfg.Listen, cfg.Principal, authMode, cfg.DryRun, cfg.KinitRefreshInterval)
 
 	k := &kerberos.Kinit{Exec: kerberos.RealExec{}}
-	if err := k.Run(cfg.Krb5Conf, cfg.Keytab, cfg.Principal); err != nil {
+	var kinitErr error
+	if cfg.Password != "" {
+		kinitErr = k.RunWithPassword(cfg.Krb5Conf, cfg.Principal, cfg.Password)
+	} else {
+		kinitErr = k.Run(cfg.Krb5Conf, cfg.Keytab, cfg.Principal)
+	}
+	if kinitErr != nil {
 		// Startup kinit must succeed — a bad keytab or unreachable KDC at
 		// boot is a config error worth failing fast on. Subsequent refresh
 		// failures degrade /healthz without exiting.
-		log.Fatalf("kinit: %v", err)
+		log.Fatalf("kinit: %v", kinitErr)
 	}
 	log.Printf("kerberos ready")
 
@@ -42,6 +52,7 @@ func main() {
 		Kinit:     k,
 		Krb5Conf:  cfg.Krb5Conf,
 		Keytab:    cfg.Keytab,
+		Password:  cfg.Password,
 		Principal: cfg.Principal,
 		Interval:  cfg.KinitRefreshInterval,
 		State:     krbState,

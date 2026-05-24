@@ -24,10 +24,45 @@ See `internal/api/types.go` for exact request/response shapes.
 |----------|-------------|
 | `RFC2136_KERBEROS_REALM` | Kerberos realm (uppercase). |
 | `RFC2136_KERBEROS_PRINCIPAL` | Service principal, e.g. `svc-dns@CORP.EXAMPLE.COM`. |
-| `RFC2136_KEYTAB_FILE` | Path inside this container to the keytab. |
 | `RFC2136_KRB5_CONF` | Path to `krb5.conf` (default `/etc/krb5.conf`). |
 | `WEBHOOK_LISTEN` | Bind address (default `:9090`). |
 | `RFC2136_DRY_RUN` | If `true`, log changes but do not send DNS UPDATE. |
+
+## AD authentication — pick exactly one
+
+The sidecar needs a way to get a Kerberos TGT at startup. Four mutually-exclusive sources are supported; set **exactly one**:
+
+| Variable | When to use |
+|----------|-------------|
+| `RFC2136_AD_PASSWORD` | Simplest. Service-account password as an env string. Equivalent to k8s external-dns `--rfc2136-kerberos-password`. |
+| `RFC2136_AD_PASSWORD_FILE` | Same as above but read from a file path (Docker secret pattern). |
+| `RFC2136_KEYTAB_FILE` | Keytab mounted at a path (Docker secret or volume). Use when AD policy forbids password-based pre-auth, or when defense-in-depth matters (the keytab contains derived keys, not the plaintext password). |
+| `RFC2136_KEYTAB_BASE64` | Keytab as base64-encoded bytes. Decoded into a `0600` temp file at startup. Use when your secret store can only return strings (e.g. 1Password Connect via the Terraform provider, which has no file-attachment item type). |
+
+Setting more than one is rejected at startup so misconfiguration fails fast.
+
+### Password mode (recommended for most users)
+
+```bash
+RFC2136_KERBEROS_REALM=CORP.EXAMPLE.COM
+RFC2136_KERBEROS_PRINCIPAL=svc-dns@CORP.EXAMPLE.COM
+RFC2136_AD_PASSWORD_FILE=/run/secrets/ad_password   # or RFC2136_AD_PASSWORD=<plaintext>
+```
+
+Behind the scenes the sidecar runs `kinit <principal>` and pipes the password via stdin. The TGT is refreshed every `RFC2136_KINIT_REFRESH_INTERVAL` (default 12h).
+
+### Keytab mode (defense-in-depth)
+
+Generate a keytab on a Domain Controller using the helper script:
+
+```powershell
+.\scripts\New-ADKeytab.ps1 `
+  -Principal "svc-dns@CORP.EXAMPLE.COM" `
+  -MapUser   "CORP\svc-dns" `
+  -OutFile   "C:\Temp\svc-dns.keytab"
+```
+
+The script wraps `ktpass.exe` with safe defaults (`-crypto AES256-SHA1 -ptype KRB5_NT_PRINCIPAL`), prompts for the password (no plaintext on disk), and optionally prints the base64 of the keytab for env-only secret stores via `-EmitBase64`.
 
 ## Build
 

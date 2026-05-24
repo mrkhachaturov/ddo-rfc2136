@@ -14,11 +14,26 @@ import (
 // different error (or nil) based on its index. Used so tests can simulate
 // "first refresh ok, second fails" patterns deterministically.
 type countingExec struct {
-	calls   int32
-	results []error
+	calls       int32
+	stdinCalls  int32
+	results     []error
+	lastArgs    []string
+	lastStdin   string
 }
 
 func (c *countingExec) Run(name string, args ...string) error {
+	c.lastArgs = args
+	i := int(atomic.AddInt32(&c.calls, 1)) - 1
+	if i < len(c.results) {
+		return c.results[i]
+	}
+	return nil
+}
+
+func (c *countingExec) RunWithStdin(name string, stdin string, args ...string) error {
+	c.lastArgs = args
+	c.lastStdin = stdin
+	atomic.AddInt32(&c.stdinCalls, 1)
 	i := int(atomic.AddInt32(&c.calls, 1)) - 1
 	if i < len(c.results) {
 		return c.results[i]
@@ -111,5 +126,32 @@ func TestRefresher_RunHonoursContextCancellation(t *testing.T) {
 func TestRefresher_DefaultIntervalIs12Hours(t *testing.T) {
 	if DefaultRefreshInterval != 12*time.Hour {
 		t.Fatalf("DefaultRefreshInterval: got %v want %v", DefaultRefreshInterval, 12*time.Hour)
+	}
+}
+
+func TestRefresher_PasswordModeDispatchesStdinKinit(t *testing.T) {
+	st := state.NewKerberos()
+	exec := &countingExec{results: []error{nil}}
+	r := &Refresher{
+		Kinit:     &Kinit{Exec: exec},
+		Krb5Conf:  "/etc/krb5.conf",
+		Password:  "hunter2",
+		Principal: "svc-dns@CORP.EXAMPLE.COM",
+		Interval:  time.Hour,
+		State:     st,
+		now:       func() time.Time { return time.Unix(1700000000, 0) },
+	}
+
+	r.refreshOnce(r.now)
+
+	if atomic.LoadInt32(&exec.stdinCalls) != 1 {
+		t.Fatalf("expected password kinit to use stdin path, stdinCalls=%d", exec.stdinCalls)
+	}
+	if exec.lastStdin != "hunter2\n" {
+		t.Fatalf("password not piped to refresher kinit: %q", exec.lastStdin)
+	}
+	status, _, _ := st.Snapshot()
+	if status != state.StatusReady {
+		t.Fatalf("expected StatusReady after successful password refresh, got %q", status)
 	}
 }

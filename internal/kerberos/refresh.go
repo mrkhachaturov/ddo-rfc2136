@@ -21,7 +21,8 @@ const DefaultRefreshInterval = 12 * time.Hour
 type Refresher struct {
 	Kinit     *Kinit
 	Krb5Conf  string
-	Keytab    string
+	Keytab    string // empty when Password is set
+	Password  string // empty when Keytab is set
 	Principal string
 	Interval  time.Duration
 	State     *state.Kerberos
@@ -61,7 +62,13 @@ func (r *Refresher) Run(ctx context.Context) error {
 // refreshOnce is split out so tests can drive it directly without spinning a
 // real ticker.
 func (r *Refresher) refreshOnce(now func() time.Time) {
-	if err := r.Kinit.Run(r.Krb5Conf, r.Keytab, r.Principal); err != nil {
+	var err error
+	if r.Password != "" {
+		err = r.Kinit.RunWithPassword(r.Krb5Conf, r.Principal, r.Password)
+	} else {
+		err = r.Kinit.Run(r.Krb5Conf, r.Keytab, r.Principal)
+	}
+	if err != nil {
 		log.Printf("rfc2136-webhook: kinit refresh failed: %v (state=expired, will retry on next interval)", err)
 		if r.State != nil {
 			r.State.MarkExpired(err.Error())
