@@ -88,13 +88,15 @@ func rrToRecord(rr dns.RR) (Record, bool) {
 		rec.Value = v.AAAA.String()
 	case *dns.CNAME:
 		rec.Type = "CNAME"
-		rec.Value = strings.ToLower(v.Target)
+		// AD stores hostname targets with a trailing dot; the operator stores them
+		// without. Strip on read so string-compare diffs are idempotent.
+		rec.Value = strings.TrimSuffix(strings.ToLower(v.Target), ".")
 	case *dns.MX:
 		rec.Type = "MX"
-		rec.Value = fmt.Sprintf("%d %s", v.Preference, strings.ToLower(v.Mx))
+		rec.Value = fmt.Sprintf("%d %s", v.Preference, strings.TrimSuffix(strings.ToLower(v.Mx), "."))
 	case *dns.NS:
 		rec.Type = "NS"
-		rec.Value = strings.ToLower(v.Ns)
+		rec.Value = strings.TrimSuffix(strings.ToLower(v.Ns), ".")
 	case *dns.TXT:
 		rec.Type = "TXT"
 		// Reassemble TXT chunks into a single quoted string for the wire contract.
