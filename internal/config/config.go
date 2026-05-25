@@ -112,10 +112,15 @@ func Load() (Config, error) {
 	}
 	domainFilter := parseDomainFilter(os.Getenv("RFC2136_DOMAIN_FILTER"))
 
+	principal, err := envOrFile("RFC2136_KERBEROS_PRINCIPAL", "RFC2136_KERBEROS_PRINCIPAL_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+
 	c := Config{
 		Listen:                  envOr("WEBHOOK_LISTEN", ":9090"),
 		Realm:                   os.Getenv("RFC2136_KERBEROS_REALM"),
-		Principal:               os.Getenv("RFC2136_KERBEROS_PRINCIPAL"),
+		Principal:               principal,
 		Keytab:                  keytab,
 		Password:                password,
 		Krb5Conf:                envOr("RFC2136_KRB5_CONF", "/etc/krb5.conf"),
@@ -139,7 +144,7 @@ func Load() (Config, error) {
 		return c, errors.New("RFC2136_KERBEROS_PRINCIPAL is required")
 	}
 	if c.Keytab == "" && c.Password == "" {
-		return c, errors.New("one of RFC2136_KEYTAB_FILE, RFC2136_KEYTAB_BASE64, RFC2136_AD_PASSWORD, or RFC2136_AD_PASSWORD_FILE is required")
+		return c, errors.New("one of RFC2136_KEYTAB_FILE, RFC2136_KEYTAB_BASE64, RFC2136_KEYTAB_BASE64_FILE, RFC2136_AD_PASSWORD, or RFC2136_AD_PASSWORD_FILE is required")
 	}
 	if !strings.Contains(c.Principal, "@") {
 		return c, errors.New("RFC2136_KERBEROS_PRINCIPAL must be in name@REALM form")
@@ -147,32 +152,35 @@ func Load() (Config, error) {
 	return c, nil
 }
 
-// resolveAuth picks exactly one of the four secret sources and returns either a
-// keytab path or a password string. The four sources are mutually exclusive;
-// any combination is rejected at startup so misconfiguration fails fast rather
+// resolveAuth picks exactly one of the five secret sources and returns either a
+// keytab path or a password string. All sources are mutually exclusive; any
+// combination is rejected at startup so misconfiguration fails fast rather
 // than silently picking one and ignoring the others.
 //
-//  1. RFC2136_KEYTAB_FILE   — keytab mounted at a path (Docker secret / volume)
-//  2. RFC2136_KEYTAB_BASE64 — keytab as base64-encoded bytes (env-only stores)
-//  3. RFC2136_AD_PASSWORD   — service-account password as env string
-//  4. RFC2136_AD_PASSWORD_FILE — password from a file (Docker secret)
+//  1. RFC2136_KEYTAB_FILE        — keytab mounted at a path (Docker secret / volume)
+//  2. RFC2136_KEYTAB_BASE64      — keytab as base64-encoded bytes (env-only stores)
+//  3. RFC2136_KEYTAB_BASE64_FILE — base64-encoded keytab read from a file
+//                                  (Docker secret holding the base64 string)
+//  4. RFC2136_AD_PASSWORD        — service-account password as env string
+//  5. RFC2136_AD_PASSWORD_FILE   — password from a file (Docker secret)
 //
 // Returns (keytabPath, password, error). Exactly one of keytabPath / password
 // is non-empty on success.
 func resolveAuth() (string, string, error) {
 	keytabFile := os.Getenv("RFC2136_KEYTAB_FILE")
 	keytabB64 := os.Getenv("RFC2136_KEYTAB_BASE64")
+	keytabB64File := os.Getenv("RFC2136_KEYTAB_BASE64_FILE")
 	password := os.Getenv("RFC2136_AD_PASSWORD")
 	passwordFile := os.Getenv("RFC2136_AD_PASSWORD_FILE")
 
 	sources := 0
-	for _, v := range []string{keytabFile, keytabB64, password, passwordFile} {
+	for _, v := range []string{keytabFile, keytabB64, keytabB64File, password, passwordFile} {
 		if v != "" {
 			sources++
 		}
 	}
 	if sources > 1 {
-		return "", "", errors.New("set exactly one of RFC2136_KEYTAB_FILE, RFC2136_KEYTAB_BASE64, RFC2136_AD_PASSWORD, RFC2136_AD_PASSWORD_FILE")
+		return "", "", errors.New("set exactly one of RFC2136_KEYTAB_FILE, RFC2136_KEYTAB_BASE64, RFC2136_KEYTAB_BASE64_FILE, RFC2136_AD_PASSWORD, RFC2136_AD_PASSWORD_FILE")
 	}
 
 	if keytabFile != "" {
@@ -180,6 +188,14 @@ func resolveAuth() (string, string, error) {
 	}
 	if keytabB64 != "" {
 		path, err := materialiseKeytabFromBase64(keytabB64)
+		return path, "", err
+	}
+	if keytabB64File != "" {
+		b, err := os.ReadFile(keytabB64File)
+		if err != nil {
+			return "", "", fmt.Errorf("RFC2136_KEYTAB_BASE64_FILE: read: %w", err)
+		}
+		path, err := materialiseKeytabFromBase64(string(b))
 		return path, "", err
 	}
 	if password != "" {
@@ -193,6 +209,28 @@ func resolveAuth() (string, string, error) {
 		return "", strings.TrimRight(string(b), "\r\n"), nil
 	}
 	return "", "", nil
+}
+
+// envOrFile resolves a string value from either an env var or a file path env
+// var (mutually exclusive). Used for non-secret-but-sensitive identifiers
+// (e.g. Kerberos principal) that operators may want delivered via Docker
+// secret rather than as a service-inspect-visible env var.
+func envOrFile(envKey, fileKey string) (string, error) {
+	env := os.Getenv(envKey)
+	file := os.Getenv(fileKey)
+	switch {
+	case env != "" && file != "":
+		return "", fmt.Errorf("set exactly one of %s or %s", envKey, fileKey)
+	case env != "":
+		return env, nil
+	case file != "":
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("%s: read: %w", fileKey, err)
+		}
+		return strings.TrimRight(string(b), "\r\n"), nil
+	}
+	return "", nil
 }
 
 func materialiseKeytabFromBase64(b64 string) (string, error) {

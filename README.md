@@ -21,7 +21,8 @@ Required:
 | Env | What it is |
 |---|---|
 | `RFC2136_KERBEROS_REALM` | Kerberos realm, uppercase (e.g. `CORP.EXAMPLE.COM`). |
-| `RFC2136_KERBEROS_PRINCIPAL` | Service principal (`svc-dns@CORP.EXAMPLE.COM`). |
+| `RFC2136_KERBEROS_PRINCIPAL` | Service principal (`svc-dns@CORP.EXAMPLE.COM`). Mutually exclusive with `RFC2136_KERBEROS_PRINCIPAL_FILE` — set one or the other. |
+| `RFC2136_KERBEROS_PRINCIPAL_FILE` | Path to a file containing the principal name. For Docker secret delivery (keeps the principal out of `docker service inspect` env output). |
 | `RFC2136_HOSTS` | Comma-separated FQDNs of writable DCs, in failover order. IPs and bare labels are rejected; Kerberos needs a real SPN. |
 | `RFC2136_ZONES` | Comma-separated zone names (no trailing dot). |
 
@@ -54,6 +55,7 @@ The sidecar needs a way to get a Kerberos TGT at startup. Four sources are suppo
 | `RFC2136_AD_PASSWORD_FILE` | Same, read from a file path (Docker secret pattern). |
 | `RFC2136_KEYTAB_FILE` | Keytab mounted at a path. Use when AD policy forbids password-based pre-auth or when defense-in-depth matters; the keytab contains derived keys, not the plaintext password. |
 | `RFC2136_KEYTAB_BASE64` | Keytab as base64-encoded bytes. Decoded into a `0600` temp file at startup. For secret stores that can only return strings. |
+| `RFC2136_KEYTAB_BASE64_FILE` | Same as `RFC2136_KEYTAB_BASE64` but the base64 string is read from a file path. Use when your secret store can only deliver strings as files (Docker secret holding a base64-encoded keytab, 1Password Connect → file sink, etc.). |
 
 ### Password mode
 

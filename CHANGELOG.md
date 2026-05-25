@@ -8,6 +8,19 @@ ddo-rfc2136 is a webhook sidecar for [docker-dns-operator](https://github.com/mr
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-25
+
+### Added
+- `RFC2136_KEYTAB_BASE64_FILE` — base64-encoded keytab delivered as a file (e.g. a Docker secret holding the base64 string). The contents are read at startup and decoded into the same `0600` temp keytab as `RFC2136_KEYTAB_BASE64`. Useful when your secret store can only mount strings as files (1Password Connect → Docker secret, Vault Agent file sink, etc.).
+- `RFC2136_KERBEROS_PRINCIPAL_FILE` — principal name read from a file. Mutually exclusive with `RFC2136_KERBEROS_PRINCIPAL`. Lets the service-account identity be delivered via Docker secret instead of as a `docker service inspect`-visible env var.
+- `HEALTHCHECK` directive in the Dockerfile — busybox `wget --spider http://127.0.0.1:9090/healthz`. The endpoint already existed; the image now wires it as the container-level liveness probe.
+
+### Changed
+- `resolveAuth` now lists five mutually-exclusive secret sources (was four). Misconfiguration error message updated to enumerate them all.
+
+[Unreleased]: https://github.com/mrkhachaturov/ddo-rfc2136/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/mrkhachaturov/ddo-rfc2136/releases/tag/v0.1.1
+
 ## [0.1.0] — 2026-05-25
 
 First tagged release.
@@ -34,5 +47,4 @@ First tagged release.
 - Distroless image, pure Go, CGO disabled. Kerberos client uses `github.com/jcmturner/gokrb5` — no MIT-Kerberos shared library needed at runtime.
 - See [README.md](README.md) for env vars and deployment examples.
 
-[Unreleased]: https://github.com/mrkhachaturov/ddo-rfc2136/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/mrkhachaturov/ddo-rfc2136/releases/tag/v0.1.0

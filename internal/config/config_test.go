@@ -440,3 +440,110 @@ func TestLoad_ZonesMissing(t *testing.T) {
 		t.Fatalf("expected error when RFC2136_ZONES missing")
 	}
 }
+
+func TestLoad_KeytabBase64FromFile(t *testing.T) {
+	os.Clearenv()
+	want := []byte{0x05, 0x02, 0xde, 0xad, 0xbe, 0xef}
+	dir := t.TempDir()
+	b64Path := dir + "/keytab.b64"
+	if err := os.WriteFile(b64Path, []byte(base64.StdEncoding.EncodeToString(want)+"\n"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
+	t.Setenv("RFC2136_KEYTAB_BASE64_FILE", b64Path)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.Keytab == "" {
+		t.Fatalf("Keytab path empty")
+	}
+	t.Cleanup(func() { _ = os.Remove(cfg.Keytab) })
+	got, err := os.ReadFile(cfg.Keytab)
+	if err != nil {
+		t.Fatalf("read materialised keytab: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("materialised bytes mismatch: got %x want %x", got, want)
+	}
+}
+
+func TestLoad_KeytabBase64FromMissingFile(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
+	t.Setenv("RFC2136_KEYTAB_BASE64_FILE", "/nonexistent/path")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected read error on missing keytab base64 file")
+	}
+}
+
+func TestLoad_KeytabBase64AndBase64FileRejected(t *testing.T) {
+	os.Clearenv()
+	dir := t.TempDir()
+	b64Path := dir + "/keytab.b64"
+	_ = os.WriteFile(b64Path, []byte(base64.StdEncoding.EncodeToString([]byte("x"))), 0o600)
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
+	t.Setenv("RFC2136_KEYTAB_BASE64", base64.StdEncoding.EncodeToString([]byte("y")))
+	t.Setenv("RFC2136_KEYTAB_BASE64_FILE", b64Path)
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected mutual-exclusion error")
+	}
+}
+
+func TestLoad_PrincipalFromFile(t *testing.T) {
+	os.Clearenv()
+	dir := t.TempDir()
+	pPath := dir + "/principal"
+	if err := os.WriteFile(pPath, []byte("svc-dns@CORP.EXAMPLE.COM\n"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL_FILE", pPath)
+	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.Principal != "svc-dns@CORP.EXAMPLE.COM" {
+		t.Fatalf("principal from file: got %q (trailing newline must be stripped)", cfg.Principal)
+	}
+}
+
+func TestLoad_PrincipalBothEnvAndFileRejected(t *testing.T) {
+	os.Clearenv()
+	dir := t.TempDir()
+	pPath := dir + "/principal"
+	_ = os.WriteFile(pPath, []byte("svc-dns@CORP.EXAMPLE.COM"), 0o600)
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL", "svc-dns@CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL_FILE", pPath)
+	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected mutual-exclusion error for principal env + file")
+	}
+}
+
+func TestLoad_PrincipalFromMissingFile(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("RFC2136_KERBEROS_REALM", "CORP.EXAMPLE.COM")
+	t.Setenv("RFC2136_KERBEROS_PRINCIPAL_FILE", "/nonexistent/path")
+	t.Setenv("RFC2136_KEYTAB_FILE", "/run/secrets/keytab")
+	t.Setenv("RFC2136_HOSTS", "dc01.corp.example.com")
+	t.Setenv("RFC2136_ZONES", "corp.example.com")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected read error on missing principal file")
+	}
+}
