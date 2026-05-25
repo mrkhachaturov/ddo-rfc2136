@@ -160,7 +160,7 @@ func Load() (Config, error) {
 //  1. RFC2136_KEYTAB_FILE        — keytab mounted at a path (Docker secret / volume)
 //  2. RFC2136_KEYTAB_BASE64      — keytab as base64-encoded bytes (env-only stores)
 //  3. RFC2136_KEYTAB_BASE64_FILE — base64-encoded keytab read from a file
-//                                  (Docker secret holding the base64 string)
+//     (Docker secret holding the base64 string)
 //  4. RFC2136_AD_PASSWORD        — service-account password as env string
 //  5. RFC2136_AD_PASSWORD_FILE   — password from a file (Docker secret)
 //

@@ -14,11 +14,11 @@ import (
 // different error (or nil) based on its index. Used so tests can simulate
 // "first refresh ok, second fails" patterns deterministically.
 type countingExec struct {
-	calls       int32
-	stdinCalls  int32
-	results     []error
-	lastArgs    []string
-	lastStdin   string
+	calls      int32
+	stdinCalls int32
+	results    []error
+	lastArgs   []string
+	lastStdin  string
 }
 
 func (c *countingExec) Run(name string, args ...string) error {

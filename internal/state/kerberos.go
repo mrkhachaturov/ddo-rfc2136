@@ -11,10 +11,10 @@ import (
 //
 //   - "ready"      most recent kinit succeeded; the cached TGT should be valid.
 //   - "expired"    the most recent kinit attempt failed; ticket has likely
-//                  expired or the KDC/keytab/principal config is broken.
-//                  The sidecar keeps running because the next refresh cycle
-//                  might recover (transient KDC blip, time skew correction,
-//                  etc.).
+//     expired or the KDC/keytab/principal config is broken.
+//     The sidecar keeps running because the next refresh cycle
+//     might recover (transient KDC blip, time skew correction,
+//     etc.).
 //   - "unknown"    initial state before the first kinit has completed.
 type KerberosStatus string
 

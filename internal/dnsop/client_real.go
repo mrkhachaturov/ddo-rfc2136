@@ -122,9 +122,9 @@ func classifyExchangeResult(resp *dns.Msg, err error) ApplyResult {
 //
 //   - BADTIME: clock skew — retryable, ops should fix NTP on the client or DC.
 //   - BADSIG:  TSIG signature mismatch — not retryable, almost always a
-//              shared-secret or principal config issue; retrying won't help.
+//     shared-secret or principal config issue; retrying won't help.
 //   - BADKEY:  the server doesn't recognise the key name — not retryable,
-//              points at a keytab/principal mismatch or stale GSS context.
+//     points at a keytab/principal mismatch or stale GSS context.
 func classifyTSIGError(err error) (ApplyResult, bool) {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
