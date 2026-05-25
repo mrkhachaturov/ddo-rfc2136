@@ -3,7 +3,7 @@
 # CGO must be enabled: bodgit/tsig/gss links against the system Kerberos
 # C library (MIT krb5 / GSSAPI). A pure-Go build (CGO_ENABLED=0) would link
 # but fail at runtime when initialising the GSS context.
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 RUN apk add --no-cache build-base krb5-dev pkgconfig
 WORKDIR /src
 COPY go.mod go.sum ./
