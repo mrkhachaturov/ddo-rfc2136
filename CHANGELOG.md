@@ -8,6 +8,9 @@ ddo-rfc2136 is a webhook sidecar for [docker-dns-operator](https://github.com/mr
 
 ## [Unreleased]
 
+### Changed
+- TGT refresh cadence is now **self-tuning from the real ticket lifetime** instead of a fixed period (#9). After each successful `kinit` the sidecar reads the issued TGT's `endtime` from the ccache and schedules the next refresh at `now + 0.5*(endtime-now)`. `RFC2136_KINIT_REFRESH_INTERVAL` (default lowered from 12h to **8h**) is now an **upper bound only**: `interval = min(configuredOrDefault, 0.5*actualLifetime)`. Against a default Active Directory (10h `MaxTicketAge`) the old 12h default left a 2h expiry window every cycle; the cadence now tracks whatever lifetime the KDC actually grants, so hardened policies (4h tickets, etc.) tighten automatically. A failed refresh now retries on a short 1-5 min backoff rather than waiting a full interval, so one transient KDC error can't open an expiry window.
+
 ### Fixed
 - Wildcard records (`*.dev.example.com`) no longer silently orphan. The paired ownership-TXT marker previously became `ddo-a.*.dev.example.com` — a `*` in a non-leftmost label, which Windows AD DNS rejects, so the read-back path never saw the record and the operator re-applied it every cycle. The marker is now encoded star-free and reversibly: a wildcard data name strips the leading `*.` and folds the wildcard into the type sentinel (`*.dev.example.com` type A → marker `ddo-a-wildcard.dev.example.com`); the inverse on read restores `*.dev.example.com`/A. The data record name itself is unchanged (leftmost `*` is legal DNS). Non-wildcard markers keep the exact `ddo-<type>.<name>` shape, so markers already persisted in AD round-trip unchanged.
 

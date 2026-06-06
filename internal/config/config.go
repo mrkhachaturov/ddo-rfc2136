@@ -25,11 +25,15 @@ type Config struct {
 	Password string
 	Krb5Conf string
 	DryRun   bool
-	// KinitRefreshInterval controls how often the background goroutine
-	// re-runs kinit to keep the TGT fresh. Default 12h (half of the AD
-	// default ticket lifetime). Overridable via RFC2136_KINIT_REFRESH_INTERVAL
-	// using Go duration syntax (e.g. "12h", "30m", "5s") so tests and ops
-	// can shorten it without rebuilding.
+	// KinitRefreshInterval is the UPPER BOUND on the background TGT refresh
+	// cadence, not a fixed period. The refresher derives the actual cadence
+	// per-ticket from the lifetime the KDC grants
+	// (min(this, 0.5*actual_TGT_lifetime)); this value only caps it. Default
+	// 8h — deliberately below the common AD MaxTicketAge of 10h so even if
+	// the issued lifetime can't be read, the ceiling alone refreshes in time.
+	// Overridable via RFC2136_KINIT_REFRESH_INTERVAL using Go duration syntax
+	// (e.g. "8h", "30m", "5s") so tests and ops can shorten it without
+	// rebuilding.
 	KinitRefreshInterval time.Duration
 
 	// Hosts is the ordered list of DC FQDNs to try (failover walks in
@@ -70,7 +74,7 @@ type Config struct {
 // sidecar round-trips that value through the ownership-TXT sibling.
 
 func Load() (Config, error) {
-	refresh, err := parseDuration("RFC2136_KINIT_REFRESH_INTERVAL", 12*time.Hour)
+	refresh, err := parseDuration("RFC2136_KINIT_REFRESH_INTERVAL", 8*time.Hour)
 	if err != nil {
 		return Config{}, err
 	}

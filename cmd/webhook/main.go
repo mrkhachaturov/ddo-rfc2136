@@ -58,6 +58,7 @@ func main() {
 		Principal: cfg.Principal,
 		Interval:  cfg.KinitRefreshInterval,
 		State:     krbState,
+		Lifetime:  kerberos.CCacheLifetime{},
 	}
 	go func() {
 		if err := refresher.Run(ctx); err != nil {

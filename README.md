@@ -40,7 +40,7 @@ Optional:
 | `RFC2136_DOMAIN_FILTER` | `""` | Comma-separated FQDN suffixes; non-matching records are skipped. Empty = no filter. |
 | `RFC2136_AXFR_TIMEOUT_SECONDS` | `30` | Per-AXFR dial+read timeout. |
 | `RFC2136_UPDATE_TIMEOUT_SECONDS` | `15` | Per-UPDATE dial+write+read timeout. |
-| `RFC2136_KINIT_REFRESH_INTERVAL` | `12h` | Background TGT refresh cadence. |
+| `RFC2136_KINIT_REFRESH_INTERVAL` | `8h` | Upper bound on the background TGT refresh cadence. The actual cadence is derived per-ticket from the lifetime the KDC grants: `min(this, 0.5 * actual_TGT_lifetime)`. A failed refresh retries on a 1-5 min backoff. |
 | `WEBHOOK_LISTEN` | `:9090` | HTTP bind address. |
 
 The sidecar has no env vars for any operator-identity concept. It does not read `PROJECT_LABEL`, `INSTANCE_ID`, or anything similar. The operator stamps its label on each request; the sidecar persists that value verbatim (see below).
@@ -65,7 +65,7 @@ RFC2136_KERBEROS_PRINCIPAL=svc-dns@CORP.EXAMPLE.COM
 RFC2136_AD_PASSWORD_FILE=/run/secrets/ad_password
 ```
 
-The sidecar runs `kinit <principal>` and pipes the password via stdin. The TGT is refreshed every `RFC2136_KINIT_REFRESH_INTERVAL` (default 12 hours).
+The sidecar runs `kinit <principal>` and pipes the password via stdin. The TGT is refreshed on a self-tuning cadence derived from the lifetime the KDC actually issues (`min(RFC2136_KINIT_REFRESH_INTERVAL, 0.5 * actual_TGT_lifetime)`); `RFC2136_KINIT_REFRESH_INTERVAL` (default 8h) is only the ceiling.
 
 ### Keytab mode
 

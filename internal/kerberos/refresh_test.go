@@ -123,9 +123,110 @@ func TestRefresher_RunHonoursContextCancellation(t *testing.T) {
 	}
 }
 
-func TestRefresher_DefaultIntervalIs12Hours(t *testing.T) {
-	if DefaultRefreshInterval != 12*time.Hour {
-		t.Fatalf("DefaultRefreshInterval: got %v want %v", DefaultRefreshInterval, 12*time.Hour)
+func TestRefresher_DefaultIntervalIs8Hours(t *testing.T) {
+	if DefaultRefreshInterval != 8*time.Hour {
+		t.Fatalf("DefaultRefreshInterval: got %v want %v", DefaultRefreshInterval, 8*time.Hour)
+	}
+}
+
+// fakeLifetime is an injectable TGT-lifetime source so tests need no KDC.
+type fakeLifetime struct {
+	endtime time.Time
+	err     error
+}
+
+func (f fakeLifetime) TGTEndTime() (time.Time, error) { return f.endtime, f.err }
+
+// When the issued ticket is short (4h), the next refresh must land at
+// 0.5*lifetime (2h) — well below the configured 8h ceiling.
+func TestRefresher_IntervalShorterThanConfiguredForShortTicket(t *testing.T) {
+	st := state.NewKerberos()
+	now := time.Unix(1700000000, 0)
+	exec := &countingExec{results: []error{nil}}
+	r := newRefresher(t, exec, st, 8*time.Hour)
+	r.now = func() time.Time { return now }
+	r.Lifetime = fakeLifetime{endtime: now.Add(4 * time.Hour)}
+
+	next := r.refreshOnce(r.now)
+
+	if want := 2 * time.Hour; next != want {
+		t.Fatalf("next interval: got %v want %v (0.5 * 4h ticket)", next, want)
+	}
+}
+
+// When the issued ticket is long (24h → 0.5*lifetime = 12h), the configured
+// ceiling (8h) wins: interval = min(configured, 0.5*lifetime).
+func TestRefresher_CeilingHonoredForLongTicket(t *testing.T) {
+	st := state.NewKerberos()
+	now := time.Unix(1700000000, 0)
+	exec := &countingExec{results: []error{nil}}
+	r := newRefresher(t, exec, st, 8*time.Hour)
+	r.now = func() time.Time { return now }
+	r.Lifetime = fakeLifetime{endtime: now.Add(24 * time.Hour)}
+
+	next := r.refreshOnce(r.now)
+
+	if want := 8 * time.Hour; next != want {
+		t.Fatalf("next interval: got %v want %v (configured ceiling)", next, want)
+	}
+}
+
+// With no configured interval, the default (8h) is the ceiling.
+func TestRefresher_DefaultCeilingWhenUnconfigured(t *testing.T) {
+	st := state.NewKerberos()
+	now := time.Unix(1700000000, 0)
+	exec := &countingExec{results: []error{nil}}
+	r := newRefresher(t, exec, st, 0)
+	r.now = func() time.Time { return now }
+	r.Lifetime = fakeLifetime{endtime: now.Add(100 * time.Hour)}
+
+	next := r.refreshOnce(r.now)
+
+	if want := DefaultRefreshInterval; next != want {
+		t.Fatalf("next interval: got %v want %v (default ceiling)", next, want)
+	}
+}
+
+// A failed refresh must reschedule on a short backoff (1-5 min), NOT the
+// full interval — one transient miss must not open an expiry window.
+func TestRefresher_FailureRetriesOnShortBackoff(t *testing.T) {
+	st := state.NewKerberos()
+	st.MarkReady(time.Unix(1, 0))
+	exec := &countingExec{results: []error{errors.New("KDC unreachable")}}
+	r := newRefresher(t, exec, st, 8*time.Hour)
+	// lifetime source should not even be consulted on failure.
+	r.Lifetime = fakeLifetime{err: errors.New("no ccache")}
+
+	next := r.refreshOnce(r.now)
+
+	if next < retryBackoffMin || next > retryBackoffMax {
+		t.Fatalf("retry backoff: got %v want within [%v,%v]", next, retryBackoffMin, retryBackoffMax)
+	}
+	status, _, _ := st.Snapshot()
+	if status != state.StatusExpired {
+		t.Fatalf("status after failure: got %q want %q", status, state.StatusExpired)
+	}
+}
+
+// If kinit succeeds but the ccache can't be read, fall back to the
+// configured ceiling rather than crashing — the ticket is valid, we just
+// can't see its endtime.
+func TestRefresher_LifetimeReadErrorFallsBackToCeiling(t *testing.T) {
+	st := state.NewKerberos()
+	now := time.Unix(1700000000, 0)
+	exec := &countingExec{results: []error{nil}}
+	r := newRefresher(t, exec, st, 6*time.Hour)
+	r.now = func() time.Time { return now }
+	r.Lifetime = fakeLifetime{err: errors.New("ccache parse error")}
+
+	next := r.refreshOnce(r.now)
+
+	if want := 6 * time.Hour; next != want {
+		t.Fatalf("fallback interval: got %v want %v (configured ceiling)", next, want)
+	}
+	status, _, _ := st.Snapshot()
+	if status != state.StatusReady {
+		t.Fatalf("status: got %q want %q (kinit succeeded)", status, state.StatusReady)
 	}
 }
 

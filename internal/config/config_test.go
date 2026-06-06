@@ -56,15 +56,15 @@ func TestLoad_DryRunFlag(t *testing.T) {
 	}
 }
 
-func TestLoad_KinitRefreshIntervalDefaultIs12h(t *testing.T) {
+func TestLoad_KinitRefreshIntervalDefaultIs8h(t *testing.T) {
 	os.Clearenv()
 	withRequiredEnv(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if cfg.KinitRefreshInterval != 12*time.Hour {
-		t.Fatalf("default KinitRefreshInterval: got %v want %v", cfg.KinitRefreshInterval, 12*time.Hour)
+	if cfg.KinitRefreshInterval != 8*time.Hour {
+		t.Fatalf("default KinitRefreshInterval: got %v want %v", cfg.KinitRefreshInterval, 8*time.Hour)
 	}
 }
 

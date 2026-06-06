@@ -6,6 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
+
+	"github.com/jcmturner/gokrb5/v8/credentials"
 )
 
 // Executor abstracts os/exec for testing.
@@ -67,6 +70,54 @@ func (k *Kinit) Run(krb5conf, keytab, principal string) error {
 		return fmt.Errorf("kinit failed: %w", err)
 	}
 	return nil
+}
+
+// CCachePath returns the process-local credential cache path that kinit
+// writes to (matching the KRB5CCNAME prepareEnv sets). The refresher reads
+// the issued TGT's endtime from here after each successful kinit.
+func CCachePath() string {
+	return fmt.Sprintf("/tmp/krb5cc_%d", os.Getpid())
+}
+
+// CCacheLifetime is a LifetimeSource backed by the on-disk credential cache.
+// It reads the krbtgt entry's EndTime so the refresher can schedule the next
+// kinit from the lifetime the KDC actually granted.
+type CCacheLifetime struct {
+	// Path is the ccache file path. Empty defaults to CCachePath().
+	Path string
+}
+
+// TGTEndTime parses the ccache and returns the expiry of the
+// ticket-granting ticket (server principal krbtgt/...). If no krbtgt entry is
+// found it falls back to the latest EndTime across all entries.
+func (c CCacheLifetime) TGTEndTime() (time.Time, error) {
+	path := c.Path
+	if path == "" {
+		path = CCachePath()
+	}
+	cc, err := credentials.LoadCCache(path)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("load ccache %s: %w", path, err)
+	}
+	var tgt, latest time.Time
+	for _, cred := range cc.GetEntries() {
+		nm := cred.Server.PrincipalName.NameString
+		if len(nm) > 0 && strings.EqualFold(nm[0], "krbtgt") {
+			if cred.EndTime.After(tgt) {
+				tgt = cred.EndTime
+			}
+		}
+		if cred.EndTime.After(latest) {
+			latest = cred.EndTime
+		}
+	}
+	if !tgt.IsZero() {
+		return tgt, nil
+	}
+	if !latest.IsZero() {
+		return latest, nil
+	}
+	return time.Time{}, fmt.Errorf("ccache %s has no usable credential endtime", path)
 }
 
 // RunWithPassword executes `kinit <principal>` and feeds the password via stdin.

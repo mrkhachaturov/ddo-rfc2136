@@ -4,6 +4,7 @@ go 1.22
 
 require (
 	github.com/bodgit/tsig v1.2.2
+	github.com/jcmturner/gokrb5/v8 v8.4.3
 	github.com/miekg/dns v1.1.62
 )
 
@@ -17,7 +18,6 @@ require (
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
 	github.com/jcmturner/gofork v1.7.6 // indirect
 	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
-	github.com/jcmturner/gokrb5/v8 v8.4.3 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
 	github.com/jinzhu/copier v0.3.5 // indirect
 	github.com/openshift/gssapi v0.0.0-20161010215902-5fb4217df13b // indirect
