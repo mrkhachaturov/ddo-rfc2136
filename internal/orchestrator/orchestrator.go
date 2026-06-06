@@ -538,8 +538,53 @@ func ownerFromEndpoint(e *Endpoint) (string, bool) {
 	return v, true
 }
 
+// wildcardSentinel is folded into the type label of an ownership-TXT marker
+// when the data record is a wildcard. A '*' is only legal DNS as the leftmost
+// label; the ownership marker prefixes the data name with a "ddo-<type>."
+// label, which would push the '*' into a NON-leftmost position
+// ("ddo-a.*.dev.example.com"). Windows AD DNS rejects that and silently
+// orphans the data record. So for a wildcard we strip the leading "*." and
+// encode the wildcard-ness into the type sentinel instead.
+const wildcardSentinel = "-wildcard"
+
+// ownershipNameFor builds the sibling ownership-TXT name for a data record.
+//
+// Encoding (reversible — see decodeOwnershipName):
+//
+//	non-wildcard "app.example.com" (A) -> "ddo-a.app.example.com"
+//	wildcard     "*.dev.example.com" (A) -> "ddo-a-wildcard.dev.example.com"
+//
+// The data record name itself is never rewritten; only the marker is.
 func ownershipNameFor(recType, name string) string {
-	return "ddo-" + strings.ToLower(recType) + "." + normalizeName(name)
+	nm := normalizeName(name)
+	typeLabel := strings.ToLower(recType)
+	if rest, ok := strings.CutPrefix(nm, "*."); ok {
+		return "ddo-" + typeLabel + wildcardSentinel + "." + rest
+	}
+	return "ddo-" + typeLabel + "." + nm
+}
+
+// decodeOwnershipName inverts ownershipNameFor. Given a normalized marker
+// name it returns the data record's (name, recordType) and ok=true, or
+// ok=false when the name isn't a "ddo-..." ownership marker.
+//
+//	"ddo-a.app.example.com"          -> ("app.example.com", "A", true)
+//	"ddo-a-wildcard.dev.example.com" -> ("*.dev.example.com", "A", true)
+func decodeOwnershipName(marker string) (dataName, recordType string, ok bool) {
+	nm := normalizeName(marker)
+	if !strings.HasPrefix(nm, "ddo-") {
+		return "", "", false
+	}
+	dot := strings.IndexByte(nm, '.')
+	if dot < 0 {
+		return "", "", false
+	}
+	typeLabel := nm[len("ddo-"):dot]
+	rest := nm[dot+1:]
+	if t, isWildcard := strings.CutSuffix(typeLabel, wildcardSentinel); isWildcard {
+		return "*." + rest, strings.ToUpper(t), true
+	}
+	return rest, strings.ToUpper(typeLabel), true
 }
 
 func indexByName(recs []dnsop.Record) map[string][]dnsop.Record {
@@ -568,16 +613,10 @@ func (o *Orchestrator) orphanOwnership(recs []dnsop.Record) map[string]bool {
 			continue
 		}
 		nm := normalizeName(r.Name)
-		if !strings.HasPrefix(nm, "ddo-") {
+		dataName, dataType, ok := decodeOwnershipName(nm)
+		if !ok {
 			continue
 		}
-		dot := strings.IndexByte(nm, '.')
-		if dot < 0 {
-			continue
-		}
-		typeLc := nm[len("ddo-"):dot]
-		dataName := nm[dot+1:]
-		dataType := strings.ToUpper(typeLc)
 		siblings := byName[dataName]
 		hasSibling := false
 		for _, s := range siblings {
@@ -749,22 +788,16 @@ func (o *Orchestrator) endpointsFromRecords(recs []dnsop.Record, zone string) []
 		if !ok {
 			continue
 		}
-		nm := normalizeName(r.Name)
-		if !strings.HasPrefix(nm, "ddo-") {
+		dataName, dataType, ok := decodeOwnershipName(r.Name)
+		if !ok {
 			continue
 		}
-		dot := strings.IndexByte(nm, '.')
-		if dot < 0 {
-			continue
-		}
-		typeLc := nm[len("ddo-"):dot]
-		dataName := nm[dot+1:]
 		byType, ok := ownedTypes[dataName]
 		if !ok {
 			byType = map[string]string{}
 			ownedTypes[dataName] = byType
 		}
-		byType[strings.ToUpper(typeLc)] = owner
+		byType[dataType] = owner
 	}
 
 	// Group data records by (name, type) → []targets. Only emit those

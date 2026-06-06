@@ -8,6 +8,9 @@ ddo-rfc2136 is a webhook sidecar for [docker-dns-operator](https://github.com/mr
 
 ## [Unreleased]
 
+### Fixed
+- Wildcard records (`*.dev.example.com`) no longer silently orphan. The paired ownership-TXT marker previously became `ddo-a.*.dev.example.com` — a `*` in a non-leftmost label, which Windows AD DNS rejects, so the read-back path never saw the record and the operator re-applied it every cycle. The marker is now encoded star-free and reversibly: a wildcard data name strips the leading `*.` and folds the wildcard into the type sentinel (`*.dev.example.com` type A → marker `ddo-a-wildcard.dev.example.com`); the inverse on read restores `*.dev.example.com`/A. The data record name itself is unchanged (leftmost `*` is legal DNS). Non-wildcard markers keep the exact `ddo-<type>.<name>` shape, so markers already persisted in AD round-trip unchanged.
+
 ## [0.1.1] — 2026-05-25
 
 ### Added

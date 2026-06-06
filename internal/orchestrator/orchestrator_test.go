@@ -651,3 +651,158 @@ func TestOrphanOwnership_NotDetectedWhenSiblingPresent(t *testing.T) {
 		t.Fatalf("expected no orphans, got %+v", orphans)
 	}
 }
+
+// -- Ownership marker encoding (wildcard handling) -------------------------
+
+// Non-wildcard names MUST keep the exact historical marker shape so markers
+// already persisted in AD keep round-tripping after upgrade.
+func TestOwnershipNameFor_NonWildcardUnchanged(t *testing.T) {
+	cases := []struct {
+		recType, name, want string
+	}{
+		{"A", "app.corp.example.com", "ddo-a.app.corp.example.com"},
+		{"AAAA", "App.Corp.Example.Com", "ddo-aaaa.app.corp.example.com"},
+		{"CNAME", "alias.corp.example.com.", "ddo-cname.alias.corp.example.com"},
+	}
+	for _, c := range cases {
+		if got := ownershipNameFor(c.recType, c.name); got != c.want {
+			t.Fatalf("ownershipNameFor(%q,%q): got %q want %q", c.recType, c.name, got, c.want)
+		}
+	}
+}
+
+// A wildcard data name must produce a marker that has NO '*' in any
+// non-leftmost label — Windows AD DNS rejects those and silently orphans the
+// data record. We strip the leading "*." and fold "wildcard" into the type
+// sentinel label.
+func TestOwnershipNameFor_WildcardIsStarFree(t *testing.T) {
+	got := ownershipNameFor("A", "*.dev.example.com")
+	if strings.Contains(got, "*") {
+		t.Fatalf("wildcard marker must not contain '*': %q", got)
+	}
+	if got != "ddo-a-wildcard.dev.example.com" {
+		t.Fatalf("wildcard marker: got %q want %q", got, "ddo-a-wildcard.dev.example.com")
+	}
+}
+
+// The marker encoding must be reversible: decodeOwnershipName is the inverse
+// of ownershipNameFor for both wildcard and non-wildcard names.
+func TestOwnershipNameRoundTrip(t *testing.T) {
+	cases := []struct {
+		recType, name string
+	}{
+		{"A", "app.corp.example.com"},
+		{"AAAA", "*.dev.example.com"},
+		{"CNAME", "*.svc.corp.example.com"},
+		{"A", "*.example.com"},
+	}
+	for _, c := range cases {
+		marker := ownershipNameFor(c.recType, c.name)
+		gotName, gotType, ok := decodeOwnershipName(marker)
+		if !ok {
+			t.Fatalf("decodeOwnershipName(%q): not recognized", marker)
+		}
+		if gotName != normalizeName(c.name) {
+			t.Fatalf("round-trip name for %q: got %q want %q", c.name, gotName, normalizeName(c.name))
+		}
+		if gotType != c.recType {
+			t.Fatalf("round-trip type for %q: got %q want %q", c.name, gotType, c.recType)
+		}
+	}
+}
+
+// A wildcard A record written via ApplyChanges must reappear on the next
+// ListRecords (Apply->List round-trip) with the leftmost '*' intact and no
+// churn. We simulate the AXFR dump the way AD would return it: data record
+// keeps the literal '*', the ownership TXT carries the star-free marker.
+func TestListRecords_WildcardRoundTrips(t *testing.T) {
+	fc := newFakeClient()
+	fc.axfrByDCZone["dc01.corp.example.com|corp.example.com"] = dnsop.RecordsResult{
+		OK: true,
+		Records: []dnsop.Record{
+			{Name: "*.dev.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.9"},
+			{Name: "ddo-a-wildcard.dev.corp.example.com", Type: "TXT", TTL: 300, Value: `"owned-by=docker-dns-operator:1"`},
+		},
+	}
+	o := New(defaultOpts(), fc)
+	eps, err := o.ListRecords(context.Background())
+	if err != nil {
+		t.Fatalf("ListRecords: %v", err)
+	}
+	if len(eps) != 1 {
+		t.Fatalf("expected 1 wildcard endpoint, got %d: %+v", len(eps), eps)
+	}
+	ep := eps[0]
+	if ep.DNSName != "*.dev.corp.example.com" {
+		t.Fatalf("wildcard data name not restored: got %q", ep.DNSName)
+	}
+	if ep.RecordType != "A" || ep.Labels["owner"] != "docker-dns-operator:1" {
+		t.Fatalf("wildcard endpoint wrong: %+v", ep)
+	}
+}
+
+// Apply of a wildcard create must emit a star-free ownership TXT marker while
+// leaving the data record name verbatim with its leftmost '*'.
+func TestApplyChanges_WildcardCreateStarFreeMarker(t *testing.T) {
+	fc := newFakeClient()
+	o := New(defaultOpts(), fc)
+	_, _ = o.ListRecords(context.Background())
+	if err := o.ApplyChanges(context.Background(), Changes{
+		Create: []*Endpoint{{
+			DNSName: "*.dev.corp.example.com", RecordType: "A", RecordTTL: 300, Targets: []string{"10.1.2.3"},
+			Labels: defaultOwnerLabels(),
+		}},
+	}); err != nil {
+		t.Fatalf("ApplyChanges: %v", err)
+	}
+	if len(fc.updateCalls) != 1 {
+		t.Fatalf("expected 1 UPDATE, got %d", len(fc.updateCalls))
+	}
+	c := fc.updateCalls[0]
+	sawData, sawTxt := false, false
+	for _, ch := range c.changes {
+		switch ch.Record.Type {
+		case "TXT":
+			sawTxt = true
+			if strings.Contains(ch.Record.Name, "*") {
+				t.Fatalf("ownership TXT marker must be star-free, got %q", ch.Record.Name)
+			}
+			if ch.Record.Name != "ddo-a-wildcard.dev.corp.example.com" {
+				t.Fatalf("wildcard TXT marker: got %q", ch.Record.Name)
+			}
+		case "A":
+			sawData = true
+			if ch.Record.Name != "*.dev.corp.example.com" {
+				t.Fatalf("data record name must keep leftmost '*': got %q", ch.Record.Name)
+			}
+		}
+	}
+	if !sawData || !sawTxt {
+		t.Fatalf("expected both data and TXT changes, got %+v", c.changes)
+	}
+}
+
+// A wildcard ownership TXT whose sibling data record is present must NOT be
+// flagged as an orphan — the orphan detector has to reverse the same marker
+// encoding to find the sibling.
+func TestOrphanOwnership_WildcardSiblingMatched(t *testing.T) {
+	o := New(defaultOpts(), newFakeClient())
+	orphans := o.orphanOwnership([]dnsop.Record{
+		{Name: "ddo-a-wildcard.dev.corp.example.com", Type: "TXT", TTL: 300, Value: `"owned-by=docker-dns-operator:1"`},
+		{Name: "*.dev.corp.example.com", Type: "A", TTL: 300, Value: "10.0.0.9"},
+	})
+	if len(orphans) != 0 {
+		t.Fatalf("wildcard sibling present, expected no orphans, got %+v", orphans)
+	}
+}
+
+func TestOrphanOwnership_WildcardOrphanDetected(t *testing.T) {
+	o := New(defaultOpts(), newFakeClient())
+	orphans := o.orphanOwnership([]dnsop.Record{
+		{Name: "ddo-a-wildcard.dev.corp.example.com", Type: "TXT", TTL: 300, Value: `"owned-by=docker-dns-operator:1"`},
+		// no sibling *.dev.corp.example.com A
+	})
+	if !orphans["ddo-a-wildcard.dev.corp.example.com"] {
+		t.Fatalf("expected wildcard orphan to be detected, got %+v", orphans)
+	}
+}
