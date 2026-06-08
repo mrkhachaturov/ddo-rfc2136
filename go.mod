@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/bodgit/tsig v1.2.2
-	github.com/jcmturner/gokrb5/v8 v8.4.3
+	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/miekg/dns v1.1.62
 )
 
