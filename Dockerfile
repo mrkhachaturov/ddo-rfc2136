@@ -11,7 +11,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/webhook ./cmd/webhook
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache krb5 krb5-libs ca-certificates && rm -rf /var/cache/apk/*
 COPY --from=builder /out/webhook /usr/local/bin/webhook
 USER 65534:65534
