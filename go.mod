@@ -1,6 +1,6 @@
 module github.com/mrkhachaturov/ddo-rfc2136
 
-go 1.22
+go 1.25.0
 
 require (
 	github.com/bodgit/tsig v1.2.2
@@ -21,10 +21,10 @@ require (
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
 	github.com/jinzhu/copier v0.3.5 // indirect
 	github.com/openshift/gssapi v0.0.0-20161010215902-5fb4217df13b // indirect
-	golang.org/x/crypto v0.25.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/mod v0.18.0 // indirect
-	golang.org/x/net v0.27.0 // indirect
+	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/sync v0.7.0 // indirect
-	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/tools v0.22.0 // indirect
 )
