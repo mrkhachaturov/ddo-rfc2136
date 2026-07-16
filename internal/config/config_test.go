@@ -547,3 +547,212 @@ func TestLoad_PrincipalFromMissingFile(t *testing.T) {
 		t.Fatalf("expected read error on missing principal file")
 	}
 }
+
+// --- auth modes -------------------------------------------------------------
+
+// withHMACEnv sets the minimum env for a valid hmac-tsig config, mirroring
+// withRequiredEnv's role for gss-tsig.
+func withHMACEnv(t *testing.T) {
+	t.Helper()
+	os.Clearenv()
+	t.Setenv("RFC2136_AUTH_MODE", "hmac-tsig")
+	t.Setenv("RFC2136_TSIG_KEY_NAME", "ddo")
+	t.Setenv("RFC2136_TSIG_SECRET", "c2VjcmV0")
+	t.Setenv("RFC2136_HOSTS", "ns1.example.com")
+	t.Setenv("RFC2136_ZONES", "example.com")
+}
+
+// An existing AD deployment sets no RFC2136_AUTH_MODE at all. It must keep
+// working untouched, so the default has to stay gss-tsig.
+func TestLoad_DefaultAuthModeIsGSSTSIG(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.AuthMode != AuthGSSTSIG {
+		t.Fatalf("default AuthMode: got %q want %q", cfg.AuthMode, AuthGSSTSIG)
+	}
+}
+
+func TestLoad_UnknownAuthModeRejected(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_AUTH_MODE", "kerberos")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error on unknown RFC2136_AUTH_MODE")
+	}
+}
+
+func TestLoad_HMAC_HappyPath(t *testing.T) {
+	withHMACEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.AuthMode != AuthHMACTSIG {
+		t.Fatalf("AuthMode: got %q", cfg.AuthMode)
+	}
+	if cfg.TSIGKeyName != "ddo." {
+		t.Fatalf("TSIGKeyName should be canonicalised to an FQDN: got %q", cfg.TSIGKeyName)
+	}
+	if cfg.TSIGSecret != "c2VjcmV0" {
+		t.Fatalf("TSIGSecret: got %q", cfg.TSIGSecret)
+	}
+}
+
+// The algorithm is stored in miekg/dns FQDN form so dnsop can hand it to
+// SetTsig without re-mapping.
+func TestLoad_HMAC_DefaultAlgorithmIsSHA256(t *testing.T) {
+	withHMACEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.TSIGAlgorithm != "hmac-sha256." {
+		t.Fatalf("default TSIGAlgorithm: got %q want %q", cfg.TSIGAlgorithm, "hmac-sha256.")
+	}
+}
+
+func TestLoad_HMAC_AlgorithmOverride(t *testing.T) {
+	withHMACEnv(t)
+	t.Setenv("RFC2136_TSIG_ALGORITHM", "hmac-sha512")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.TSIGAlgorithm != "hmac-sha512." {
+		t.Fatalf("TSIGAlgorithm: got %q", cfg.TSIGAlgorithm)
+	}
+}
+
+// A typo in the algorithm must fail at startup, not at the first UPDATE.
+func TestLoad_HMAC_InvalidAlgorithmRejected(t *testing.T) {
+	withHMACEnv(t)
+	t.Setenv("RFC2136_TSIG_ALGORITHM", "hmac-sha257")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error on unsupported TSIG algorithm")
+	}
+}
+
+func TestLoad_HMAC_MissingKeyName(t *testing.T) {
+	withHMACEnv(t)
+	os.Unsetenv("RFC2136_TSIG_KEY_NAME")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error on missing RFC2136_TSIG_KEY_NAME")
+	}
+}
+
+func TestLoad_HMAC_MissingSecret(t *testing.T) {
+	withHMACEnv(t)
+	os.Unsetenv("RFC2136_TSIG_SECRET")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected error on missing RFC2136_TSIG_SECRET")
+	}
+}
+
+func TestLoad_HMAC_SecretFromFile(t *testing.T) {
+	withHMACEnv(t)
+	os.Unsetenv("RFC2136_TSIG_SECRET")
+	dir := t.TempDir()
+	p := dir + "/tsig"
+	if err := os.WriteFile(p, []byte("c2VjcmV0\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("RFC2136_TSIG_SECRET_FILE", p)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.TSIGSecret != "c2VjcmV0" {
+		t.Fatalf("secret from file should be newline-trimmed: got %q", cfg.TSIGSecret)
+	}
+}
+
+func TestLoad_HMAC_SecretEnvAndFileMutuallyExclusive(t *testing.T) {
+	withHMACEnv(t)
+	t.Setenv("RFC2136_TSIG_SECRET_FILE", "/run/secrets/tsig")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected mutual-exclusion error for TSIG secret env + file")
+	}
+}
+
+// Kerberos settings in hmac-tsig mode mean the operator thinks they configured
+// auth that will never be used. Fail rather than ignore.
+func TestLoad_HMAC_RejectsKerberosVars(t *testing.T) {
+	for _, k := range []string{"RFC2136_KERBEROS_REALM", "RFC2136_KERBEROS_PRINCIPAL", "RFC2136_KEYTAB_FILE", "RFC2136_AD_PASSWORD"} {
+		t.Run(k, func(t *testing.T) {
+			withHMACEnv(t)
+			t.Setenv(k, "x")
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error when %s is set in hmac-tsig mode", k)
+			}
+		})
+	}
+}
+
+func TestLoad_GSS_RejectsTSIGVars(t *testing.T) {
+	for _, k := range []string{"RFC2136_TSIG_KEY_NAME", "RFC2136_TSIG_SECRET", "RFC2136_TSIG_ALGORITHM"} {
+		t.Run(k, func(t *testing.T) {
+			os.Clearenv()
+			withRequiredEnv(t)
+			t.Setenv(k, "x")
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error when %s is set in gss-tsig mode", k)
+			}
+		})
+	}
+}
+
+// Kerberos needs an FQDN with a matching SPN; plain TSIG does not, and a
+// homelab Technitium/BIND is routinely reached by IP.
+func TestLoad_HMAC_AllowsIPHost(t *testing.T) {
+	withHMACEnv(t)
+	t.Setenv("RFC2136_HOSTS", "10.1.125.10,192.168.1.5")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(cfg.Hosts) != 2 || cfg.Hosts[0] != "10.1.125.10" {
+		t.Fatalf("Hosts: %+v", cfg.Hosts)
+	}
+}
+
+func TestLoad_GSS_StillRejectsIPHost(t *testing.T) {
+	os.Clearenv()
+	withRequiredEnv(t)
+	t.Setenv("RFC2136_HOSTS", "10.1.125.10")
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected IP literal to stay rejected in gss-tsig mode")
+	}
+}
+
+func TestLoad_Insecure_HappyPath(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("RFC2136_AUTH_MODE", "insecure")
+	t.Setenv("RFC2136_HOSTS", "10.1.125.10")
+	t.Setenv("RFC2136_ZONES", "example.com")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.AuthMode != AuthInsecure {
+		t.Fatalf("AuthMode: got %q", cfg.AuthMode)
+	}
+}
+
+func TestLoad_Insecure_RejectsAuthVars(t *testing.T) {
+	for _, k := range []string{"RFC2136_TSIG_KEY_NAME", "RFC2136_KERBEROS_REALM"} {
+		t.Run(k, func(t *testing.T) {
+			os.Clearenv()
+			t.Setenv("RFC2136_AUTH_MODE", "insecure")
+			t.Setenv("RFC2136_HOSTS", "10.1.125.10")
+			t.Setenv("RFC2136_ZONES", "example.com")
+			t.Setenv(k, "x")
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error when %s is set in insecure mode", k)
+			}
+		})
+	}
+}
