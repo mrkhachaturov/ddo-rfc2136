@@ -7,15 +7,57 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
+// AuthMode selects how UPDATE and AXFR messages are authenticated. The wire
+// protocol is RFC 2136 either way; only the signature on the message differs.
+type AuthMode string
+
+const (
+	// AuthGSSTSIG is RFC 3645 GSS-TSIG (Kerberos). Active Directory speaks
+	// only this. It is the default because every deployment that predates the
+	// mode switch runs it and sets no RFC2136_AUTH_MODE.
+	AuthGSSTSIG AuthMode = "gss-tsig"
+	// AuthHMACTSIG is RFC 8945 TSIG with a pre-shared HMAC key — what BIND,
+	// Knot, PowerDNS and Technitium speak.
+	AuthHMACTSIG AuthMode = "hmac-tsig"
+	// AuthInsecure sends unsigned UPDATEs, leaving authorisation entirely to
+	// the server's network ACL.
+	AuthInsecure AuthMode = "insecure"
+)
+
+// tsigAlgs maps the env-facing algorithm name to the FQDN form miekg/dns wants
+// in SetTsig. Mirrors upstream external-dns's supported set.
+var tsigAlgs = map[string]string{
+	"hmac-sha1":   dns.HmacSHA1,
+	"hmac-sha224": dns.HmacSHA224,
+	"hmac-sha256": dns.HmacSHA256,
+	"hmac-sha384": dns.HmacSHA384,
+	"hmac-sha512": dns.HmacSHA512,
+}
+
 type Config struct {
-	Listen    string
-	Realm     string
-	Principal string
+	Listen string
+	// AuthMode decides which fields below are meaningful: Realm/Principal/
+	// Keytab/Password for gss-tsig, TSIG* for hmac-tsig, none for insecure.
+	// Load rejects cross-mode settings rather than ignoring them.
+	AuthMode AuthMode
+	// TSIGKeyName is the key name as configured on the DNS server, in FQDN
+	// form. Only populated in hmac-tsig mode.
+	TSIGKeyName string
+	// TSIGSecret is the base64 shared secret paired with TSIGKeyName.
+	TSIGSecret string
+	// TSIGAlgorithm is the canonical FQDN form (e.g. "hmac-sha256."), already
+	// validated against tsigAlgs so dnsop can pass it straight to SetTsig.
+	TSIGAlgorithm string
+	Realm         string
+	Principal     string
 	// Keytab is the on-disk path used by `kinit -kt`. Empty when password
 	// auth is in effect.
 	Keytab string
@@ -74,13 +116,28 @@ type Config struct {
 // sidecar round-trips that value through the ownership-TXT sibling.
 
 func Load() (Config, error) {
+	mode, err := parseAuthMode(os.Getenv("RFC2136_AUTH_MODE"))
+	if err != nil {
+		return Config{}, err
+	}
+	if err := rejectForeignEnv(mode); err != nil {
+		return Config{}, err
+	}
 	refresh, err := parseDuration("RFC2136_KINIT_REFRESH_INTERVAL", 8*time.Hour)
 	if err != nil {
 		return Config{}, err
 	}
-	keytab, password, err := resolveAuth()
-	if err != nil {
-		return Config{}, err
+	var keytab, password string
+	if mode == AuthGSSTSIG {
+		if keytab, password, err = resolveAuth(); err != nil {
+			return Config{}, err
+		}
+	}
+	var tsigKey, tsigSecret, tsigAlg string
+	if mode == AuthHMACTSIG {
+		if tsigKey, tsigSecret, tsigAlg, err = resolveTSIG(); err != nil {
+			return Config{}, err
+		}
 	}
 	axfrTimeout, err := parseSeconds("RFC2136_AXFR_TIMEOUT_SECONDS", 30*time.Second)
 	if err != nil {
@@ -106,7 +163,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	hosts, err := parseHosts(os.Getenv("RFC2136_HOSTS"))
+	hosts, err := parseHosts(os.Getenv("RFC2136_HOSTS"), mode)
 	if err != nil {
 		return Config{}, err
 	}
@@ -123,6 +180,10 @@ func Load() (Config, error) {
 
 	c := Config{
 		Listen:                  envOr("WEBHOOK_LISTEN", ":9090"),
+		AuthMode:                mode,
+		TSIGKeyName:             tsigKey,
+		TSIGSecret:              tsigSecret,
+		TSIGAlgorithm:           tsigAlg,
 		Realm:                   os.Getenv("RFC2136_KERBEROS_REALM"),
 		Principal:               principal,
 		Keytab:                  keytab,
@@ -141,19 +202,113 @@ func Load() (Config, error) {
 		AxfrTimeout:             axfrTimeout,
 		UpdateTimeout:           updateTimeout,
 	}
-	if c.Realm == "" {
-		return c, errors.New("RFC2136_KERBEROS_REALM is required")
-	}
-	if c.Principal == "" {
-		return c, errors.New("RFC2136_KERBEROS_PRINCIPAL is required")
-	}
-	if c.Keytab == "" && c.Password == "" {
-		return c, errors.New("one of RFC2136_KEYTAB_FILE, RFC2136_KEYTAB_BASE64, RFC2136_KEYTAB_BASE64_FILE, RFC2136_AD_PASSWORD, or RFC2136_AD_PASSWORD_FILE is required")
-	}
-	if !strings.Contains(c.Principal, "@") {
-		return c, errors.New("RFC2136_KERBEROS_PRINCIPAL must be in name@REALM form")
+	if err := c.validate(); err != nil {
+		return c, err
 	}
 	return c, nil
+}
+
+// validate enforces the per-mode contract for whichever auth mode is active.
+func (c Config) validate() error {
+	switch c.AuthMode {
+	case AuthGSSTSIG:
+		if c.Realm == "" {
+			return errors.New("RFC2136_KERBEROS_REALM is required in gss-tsig mode")
+		}
+		if c.Principal == "" {
+			return errors.New("RFC2136_KERBEROS_PRINCIPAL is required in gss-tsig mode")
+		}
+		if c.Keytab == "" && c.Password == "" {
+			return errors.New("one of RFC2136_KEYTAB_FILE, RFC2136_KEYTAB_BASE64, RFC2136_KEYTAB_BASE64_FILE, RFC2136_AD_PASSWORD, or RFC2136_AD_PASSWORD_FILE is required in gss-tsig mode")
+		}
+		if !strings.Contains(c.Principal, "@") {
+			return errors.New("RFC2136_KERBEROS_PRINCIPAL must be in name@REALM form")
+		}
+	case AuthHMACTSIG:
+		if c.TSIGKeyName == "" {
+			return errors.New("RFC2136_TSIG_KEY_NAME is required in hmac-tsig mode")
+		}
+		if c.TSIGSecret == "" {
+			return errors.New("one of RFC2136_TSIG_SECRET or RFC2136_TSIG_SECRET_FILE is required in hmac-tsig mode")
+		}
+	case AuthInsecure:
+		// Nothing to check: the mode's whole point is that we sign nothing.
+		// rejectForeignEnv has already refused any auth settings.
+	}
+	return nil
+}
+
+func parseAuthMode(raw string) (AuthMode, error) {
+	switch m := AuthMode(strings.ToLower(strings.TrimSpace(raw))); m {
+	case "":
+		return AuthGSSTSIG, nil
+	case AuthGSSTSIG, AuthHMACTSIG, AuthInsecure:
+		return m, nil
+	default:
+		return "", fmt.Errorf("RFC2136_AUTH_MODE: %q is not one of %s, %s, %s", raw, AuthGSSTSIG, AuthHMACTSIG, AuthInsecure)
+	}
+}
+
+// Settings that only one mode reads. Anything here being set under a different
+// mode is refused rather than ignored: a stray RFC2136_AD_PASSWORD in
+// hmac-tsig mode means someone believes they configured auth that is never read.
+var (
+	gssEnvVars = []string{
+		"RFC2136_KERBEROS_REALM", "RFC2136_KERBEROS_PRINCIPAL", "RFC2136_KERBEROS_PRINCIPAL_FILE",
+		"RFC2136_KEYTAB_FILE", "RFC2136_KEYTAB_BASE64", "RFC2136_KEYTAB_BASE64_FILE",
+		"RFC2136_AD_PASSWORD", "RFC2136_AD_PASSWORD_FILE",
+		"RFC2136_KRB5_CONF", "RFC2136_KINIT_REFRESH_INTERVAL",
+	}
+	tsigEnvVars = []string{
+		"RFC2136_TSIG_KEY_NAME", "RFC2136_TSIG_SECRET", "RFC2136_TSIG_SECRET_FILE",
+		"RFC2136_TSIG_ALGORITHM",
+	}
+)
+
+func rejectForeignEnv(mode AuthMode) error {
+	foreign := map[AuthMode][][]string{
+		AuthGSSTSIG:  {tsigEnvVars},
+		AuthHMACTSIG: {gssEnvVars},
+		AuthInsecure: {gssEnvVars, tsigEnvVars},
+	}
+	for _, group := range foreign[mode] {
+		for _, k := range group {
+			if os.Getenv(k) != "" {
+				return fmt.Errorf("%s is set but RFC2136_AUTH_MODE=%s never reads it", k, mode)
+			}
+		}
+	}
+	return nil
+}
+
+// resolveTSIG reads the hmac-tsig key material. The secret follows the same
+// env-or-file pattern as the Kerberos password so it can arrive as a Docker
+// secret. Key name and algorithm come back in the FQDN form miekg/dns wants,
+// so dnsop can hand them to SetTsig untouched.
+func resolveTSIG() (string, string, string, error) {
+	secret, err := envOrFile("RFC2136_TSIG_SECRET", "RFC2136_TSIG_SECRET_FILE")
+	if err != nil {
+		return "", "", "", err
+	}
+	algName := strings.ToLower(strings.TrimSpace(envOr("RFC2136_TSIG_ALGORITHM", "hmac-sha256")))
+	alg, ok := tsigAlgs[algName]
+	if !ok {
+		return "", "", "", fmt.Errorf("RFC2136_TSIG_ALGORITHM: %q is not a supported TSIG algorithm (want one of %s)", algName, strings.Join(supportedAlgs(), ", "))
+	}
+	var name string
+	if raw := strings.TrimSpace(os.Getenv("RFC2136_TSIG_KEY_NAME")); raw != "" {
+		name = dns.Fqdn(strings.ToLower(raw))
+	}
+	return name, secret, alg, nil
+}
+
+func supportedAlgs() []string {
+	out := make([]string, 0, len(tsigAlgs))
+	for k := range tsigAlgs {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // resolveAuth picks exactly one of the five secret sources and returns either a
@@ -339,13 +494,15 @@ func parsePositiveInt64(key string, fallback int64) (int64, error) {
 
 // fqdnRe matches a simple multi-label hostname. It deliberately rejects bare
 // names ("dc01") and IP literals — DNS-over-Kerberos can only target an
-// FQDN whose SPN exists in AD, so accepting an IP here would mask a real
-// misconfiguration.
+// FQDN whose SPN exists in AD, so accepting an IP there would mask a real
+// misconfiguration. Plain TSIG has no such constraint: it signs with a
+// pre-shared key and never resolves an SPN, so a BIND or Technitium box
+// reached at 10.1.125.10 is perfectly legitimate.
 var fqdnRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\.?$`)
 
-func parseHosts(raw string) ([]string, error) {
+func parseHosts(raw string, mode AuthMode) ([]string, error) {
 	if raw == "" {
-		return nil, errors.New("RFC2136_HOSTS is required (comma-separated DC FQDNs)")
+		return nil, errors.New("RFC2136_HOSTS is required (comma-separated server names)")
 	}
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
@@ -355,7 +512,11 @@ func parseHosts(raw string) ([]string, error) {
 			continue
 		}
 		if ip := net.ParseIP(h); ip != nil {
-			return nil, fmt.Errorf("RFC2136_HOSTS: %q is an IP literal — Kerberos auth requires an FQDN with a matching SPN", h)
+			if mode == AuthGSSTSIG {
+				return nil, fmt.Errorf("RFC2136_HOSTS: %q is an IP literal — Kerberos auth requires an FQDN with a matching SPN", h)
+			}
+			out = append(out, h)
+			continue
 		}
 		if !fqdnRe.MatchString(h) {
 			return nil, fmt.Errorf("RFC2136_HOSTS: %q is not a valid FQDN", h)
@@ -363,7 +524,7 @@ func parseHosts(raw string) ([]string, error) {
 		out = append(out, h)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("RFC2136_HOSTS is required (comma-separated DC FQDNs)")
+		return nil, errors.New("RFC2136_HOSTS is required (comma-separated server names)")
 	}
 	return out, nil
 }
