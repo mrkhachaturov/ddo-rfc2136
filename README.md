@@ -1,8 +1,18 @@
 # ddo-rfc2136
 
-The Active Directory DNS sidecar for [docker-dns-operator](https://github.com/mrkhachaturov/docker-dns-operator). It owns the DNS UPDATE conversation with your domain controllers. The operator tells it which records should exist; this process writes them via RFC 2136 DNS UPDATE secured with RFC 3645 GSS-TSIG (Kerberos).
+The RFC 2136 DNS sidecar for [docker-dns-operator](https://github.com/mrkhachaturov/docker-dns-operator). It owns the DNS UPDATE conversation with your authoritative servers. The operator tells it which records should exist; this process writes them via DNS UPDATE.
 
-This is the part that has to be written in Go. Node has no mature GSS-TSIG implementation; Go does (`github.com/miekg/dns` + `github.com/bodgit/tsig/gss`). Pulling it out as its own process keeps the operator language-agnostic and the AD code in a runtime that can actually do the auth.
+Any server that speaks RFC 2136 works: Active Directory, BIND, Knot, PowerDNS, Technitium. The wire protocol is the same everywhere — only the signature on the message differs, which is what `RFC2136_AUTH_MODE` selects:
+
+| Mode | Signature | Who speaks it |
+|---|---|---|
+| `gss-tsig` (default) | RFC 3645 GSS-TSIG (Kerberos) | Active Directory — it accepts nothing else |
+| `hmac-tsig` | RFC 8945 TSIG, pre-shared key | BIND, Knot, PowerDNS, Technitium |
+| `insecure` | none | anything, authorised by network ACL alone |
+
+The default is `gss-tsig` because that is what this sidecar shipped with. An existing AD deployment sets no `RFC2136_AUTH_MODE` and keeps working untouched.
+
+This is the part that has to be written in Go. Node has no mature GSS-TSIG implementation; Go does (`github.com/miekg/dns` + `github.com/bodgit/tsig`). Pulling it out as its own process keeps the operator language-agnostic and the auth code in a runtime that can actually do it.
 
 ## What it does
 
@@ -10,42 +20,81 @@ Three jobs, one binary:
 
 - Apply changes the operator sends (create / update / delete records) using DNS UPDATE with `NXRRSET` / `YXRRSET` prerequisites so two operators can't silently overwrite each other.
 - AXFR each managed zone on read so the operator can see drift and reconcile against reality, not against in-memory state.
-- Run Kerberos: `kinit` at startup, refresh the TGT in the background, fail loudly on auth issues instead of silently going stale.
+- Under `gss-tsig` only, run Kerberos: `kinit` at startup, refresh the TGT in the background, fail loudly on auth issues instead of silently going stale. The TSIG modes have no credential to acquire or keep alive, so they skip all of it.
 
-It also handles per-DC failover (pin a zone to its last successful DC, walk the rest of `RFC2136_HOSTS` on transient errors) and per-DC circuit breakers, because AD environments routinely have one DC misbehave while the rest are fine.
+It also handles per-server failover (pin a zone to its last successful server, walk the rest of `RFC2136_HOSTS` on transient errors) and per-server circuit breakers, because AD environments routinely have one DC misbehave while the rest are fine.
 
 ## How to configure
 
-Required:
+Required in every mode:
+
+| Env | What it is |
+|---|---|
+| `RFC2136_HOSTS` | Comma-separated servers, in failover order. IP literals are accepted except under `gss-tsig`, where Kerberos needs an FQDN with a matching SPN. |
+| `RFC2136_ZONES` | Comma-separated zone names (no trailing dot). |
+
+Required under `gss-tsig` (the default):
 
 | Env | What it is |
 |---|---|
 | `RFC2136_KERBEROS_REALM` | Kerberos realm, uppercase (e.g. `CORP.EXAMPLE.COM`). |
 | `RFC2136_KERBEROS_PRINCIPAL` | Service principal (`svc-dns@CORP.EXAMPLE.COM`). Mutually exclusive with `RFC2136_KERBEROS_PRINCIPAL_FILE` — set one or the other. |
 | `RFC2136_KERBEROS_PRINCIPAL_FILE` | Path to a file containing the principal name. For Docker secret delivery (keeps the principal out of `docker service inspect` env output). |
-| `RFC2136_HOSTS` | Comma-separated FQDNs of writable DCs, in failover order. IPs and bare labels are rejected; Kerberos needs a real SPN. |
-| `RFC2136_ZONES` | Comma-separated zone names (no trailing dot). |
+
+Required under `hmac-tsig`:
+
+| Env | What it is |
+|---|---|
+| `RFC2136_TSIG_KEY_NAME` | Key name exactly as configured on the server. |
+| `RFC2136_TSIG_SECRET` | Base64 shared secret. Mutually exclusive with `RFC2136_TSIG_SECRET_FILE`. |
+| `RFC2136_TSIG_SECRET_FILE` | Same, read from a file path (Docker secret pattern). |
+
+Settings belonging to another mode are **rejected at startup**, not ignored: a stray `RFC2136_AD_PASSWORD` under `hmac-tsig` means someone believes they configured auth that will never be read.
 
 Optional:
 
 | Env | Default | Notes |
 |---|---|---|
+| `RFC2136_AUTH_MODE` | `gss-tsig` | One of `gss-tsig`, `hmac-tsig`, `insecure`. |
+| `RFC2136_TSIG_ALGORITHM` | `hmac-sha256` | `hmac-tsig` only. One of `hmac-sha1`, `hmac-sha224`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512`. Checked at startup, not at the first UPDATE. |
+
+| Env | Default | Notes |
+|---|---|---|
 | `RFC2136_PORT` | `53` | DNS port. |
-| `RFC2136_KRB5_CONF` | `/etc/krb5.conf` | Path to `krb5.conf`. |
+| `RFC2136_KRB5_CONF` | `/etc/krb5.conf` | `gss-tsig` only. Path to `krb5.conf`. |
 | `RFC2136_DRY_RUN` | `false` | Log changes but don't send UPDATE. Useful for dress rehearsals. |
 | `RFC2136_AXFR_ENABLED` | `true` | If `false`, read returns `[]` and the operator relies entirely on UPDATE prerequisites for collision detection. |
 | `RFC2136_DEFAULT_TTL` | `3600` | Used when the operator sends a record without a TTL. |
 | `RFC2136_MIN_TTL` | `60` | Floor for any inbound TTL. |
-| `RFC2136_CIRCUIT_BREAKER_THRESHOLD` | `3` | Consecutive failing cycles before a DC's circuit opens. |
+| `RFC2136_CIRCUIT_BREAKER_THRESHOLD` | `3` | Consecutive failing cycles before a server's circuit opens. |
 | `RFC2136_DOMAIN_FILTER` | `""` | Comma-separated FQDN suffixes; non-matching records are skipped. Empty = no filter. |
 | `RFC2136_AXFR_TIMEOUT_SECONDS` | `30` | Per-AXFR dial+read timeout. |
 | `RFC2136_UPDATE_TIMEOUT_SECONDS` | `15` | Per-UPDATE dial+write+read timeout. |
-| `RFC2136_KINIT_REFRESH_INTERVAL` | `8h` | Upper bound on the background TGT refresh cadence. The actual cadence is derived per-ticket from the lifetime the KDC grants: `min(this, 0.5 * actual_TGT_lifetime)`. A failed refresh retries on a 1-5 min backoff. |
+| `RFC2136_KINIT_REFRESH_INTERVAL` | `8h` | `gss-tsig` only. Upper bound on the background TGT refresh cadence. The actual cadence is derived per-ticket from the lifetime the KDC grants: `min(this, 0.5 * actual_TGT_lifetime)`. A failed refresh retries on a 1-5 min backoff. |
 | `WEBHOOK_LISTEN` | `:9090` | HTTP bind address. |
 
 The sidecar has no env vars for any operator-identity concept. It does not read `PROJECT_LABEL`, `INSTANCE_ID`, or anything similar. The operator stamps its label on each request; the sidecar persists that value verbatim (see below).
 
-## AD authentication: pick exactly one
+## hmac-tsig: BIND, Knot, PowerDNS, Technitium
+
+```bash
+RFC2136_AUTH_MODE=hmac-tsig
+RFC2136_HOSTS=10.1.125.10
+RFC2136_ZONES=example.com
+RFC2136_TSIG_KEY_NAME=ddo
+RFC2136_TSIG_SECRET_FILE=/run/secrets/tsig
+RFC2136_TSIG_ALGORITHM=hmac-sha256
+```
+
+No Kerberos, no `kinit`, no `krb5.conf`, no TGT to keep alive. The key name must match the server's exactly — a mismatch surfaces as `BADKEY`, a wrong secret as `BADSIG`, and neither is retried, because the next tick would be just as wrong.
+
+Server side you need two things: allow dynamic updates for the zone bound to this key, and allow zone transfer to the same key — the sidecar reads via AXFR, and without it `GET /records` returns `[]` and the operator loses its view of drift. On Technitium that is *Zone Options → Dynamic Updates → Allow* with a security policy naming the key, plus the key in *Zone Transfer → TSIG key names*. Technitium's security policy is per key, per domain and per record type, so the key can be scoped to exactly what this instance manages.
+
+## insecure
+
+`RFC2136_AUTH_MODE=insecure` signs nothing. Anyone who can reach the server's UPDATE port and passes its network ACL can write the same records. It warns on every boot. Use it only where the ACL is the real control.
+
+## AD authentication (gss-tsig): pick exactly one
 
 The sidecar needs a way to get a Kerberos TGT at startup. Four sources are supported; set exactly one. More than one is rejected at startup so misconfiguration fails fast:
 
