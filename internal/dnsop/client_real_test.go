@@ -7,8 +7,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-// TestClassifyExchangeResult covers the bodgit/tsig response-verify quirk and
-// the surrounding error/response classification branches in classifyExchangeResult.
+// TestClassifyExchangeResult covers the unverifiable-reply branch (the server
+// applied the change but never authenticated us) and the surrounding
+// error/response classification branches in classifyExchangeResult.
 func TestClassifyExchangeResult(t *testing.T) {
 	makeResp := func(rcode int) *dns.Msg {
 		m := new(dns.Msg)
@@ -27,7 +28,11 @@ func TestClassifyExchangeResult(t *testing.T) {
 		wantRetry bool
 	}{
 		{
-			name:      "TSIG verify quirk: err with NOERROR response is treated as success",
+			// The server wrote the record but signed nothing we can check, so
+			// it never verified us either: the write went in unauthenticated.
+			// Reported as applied because the record is really there — the
+			// warning, not the result, is what carries the diagnosis.
+			name:      "unverifiable reply on NOERROR is still reported as applied",
 			resp:      makeResp(dns.RcodeSuccess),
 			err:       errors.New("dns: bad tsig"),
 			wantOK:    true,

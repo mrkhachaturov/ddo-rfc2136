@@ -99,15 +99,34 @@ func (c *RealClient) Update(host string, port int, zone string, prereqs []Prereq
 
 // classifyExchangeResult maps a (resp, err) tuple from dns.Client.Exchange into
 // an ApplyResult. It is split out from Update so it can be unit-tested without
-// a live DNS server or GSS context. The bodgit/tsig response-TSIG verify quirk
-// against Active Directory is handled here: when err is non-nil but the
-// response is a well-formed NOERROR, AD committed the UPDATE atomically before
-// our local TSIG verification ran, so treat it as success and emit a warning.
-// Refs: bodgit/tsig#54, hashicorp/terraform-provider-dns#160.
+// a live DNS server or GSS context.
+//
+// The case worth explaining is err != nil on a NOERROR response: the server
+// applied the change but its reply carries no signature we can verify. Per RFC
+// 8945 a server that verified our signature signs its reply with the same key,
+// so an unverifiable reply means the server never checked us — the write landed
+// unauthenticated.
+//
+// Active Directory does exactly this when the zone is set to "Nonsecure and
+// secure": it takes the non-secure path, never engages its TSIG code, applies
+// the record with no owner, and returns our own MIC verbatim instead of signing
+// one. That echo is what gokrb5 reports as "acceptor flag is not set" — the
+// token really is ours, bounced back. Confirmed on the wire: request and
+// response TSIG byte-identical down to our own 300s fudge, while the TKEY reply
+// on the same context seconds earlier carried a genuine acceptor MIC. Set the
+// zone to "Secure only" and AD verifies, signs, stamps ownership, and this
+// branch goes quiet. bodgit/tsig#54 guessed the echo correctly; the cause is
+// the zone setting, not the library.
+//
+// The record lands either way, so this is not a failure — but it is not the
+// secure update that was asked for, and the whole point is to say so.
 func classifyExchangeResult(resp *dns.Msg, err error) ApplyResult {
 	if err != nil {
 		if resp != nil && resp.Rcode == dns.RcodeSuccess {
-			log.Printf("rfc2136-webhook: WARN response TSIG verify quirk (committed, rcode=NOERROR): %v", err)
+			log.Printf("rfc2136-webhook: WARN server did not sign its reply, so it never verified ours: "+
+				"this UPDATE was applied UNAUTHENTICATED and the record is not owned by our principal. "+
+				"Against Active Directory this means the zone allows non-secure updates — set it to "+
+				"Secure only. (rcode=NOERROR, verify: %v)", err)
 			return ApplyResult{OK: true, Rcode: "NOERROR"}
 		}
 		if resp != nil {

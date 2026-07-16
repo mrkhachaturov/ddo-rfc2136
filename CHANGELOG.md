@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ddo-rfc2136 is a webhook sidecar for [docker-dns-operator](https://github.com/mrkhachaturov/docker-dns-operator), implementing the [external-dns webhook provider v1 contract](https://kubernetes-sigs.github.io/external-dns/latest/docs/tutorials/webhook-provider/) against any authoritative server that speaks RFC 2136 — Active Directory (GSS-TSIG), BIND, Knot, PowerDNS and Technitium (HMAC-TSIG). The same sidecar works with the upstream kubernetes-sigs/external-dns controller.
 
+## [Unreleased]
+
+### Fixed
+- **An unverifiable UPDATE reply was misdiagnosed as a benign library quirk.** When an UPDATE returned `NOERROR` but its reply carried no signature we could verify, the sidecar logged a vague "TSIG verify quirk (committed)" and moved on. That framing hid a real problem: per RFC 8945 a server that verified our signature signs its reply with the same key, so an unverifiable reply means the server **never checked us** — the write landed unauthenticated.
+
+  Against Active Directory this is a zone left on **"Nonsecure and secure"**: AD takes the non-secure path, skips its TSIG code entirely, applies the record with no owner (it ends up `SYSTEM`-owned, not owned by the sidecar's principal), and returns our own request MIC verbatim instead of signing a reply. That echo is what `gokrb5` reports as `unexpected acceptor flag is not set` — the token really is ours, bounced back. Confirmed on the wire against a live DC: the request TSIG and the response TSIG were byte-identical down to our own 300s fudge, while the TKEY reply on the same context seconds earlier carried a genuine acceptor MIC. Setting the zone to **"Secure only"** made AD verify the signature, sign its reply, and stamp ownership — and silenced the warning on the test record and every subsequent reconcile tick.
+
+  The record still lands either way, so this remains a success rather than an error — but the `WARN` now states plainly that the write was unauthenticated and names the cause (against AD, set the zone to Secure only) instead of blaming the library. The `bodgit/tsig#54` / `hashicorp/terraform-provider-dns#160` "AD quirk" references are dropped: #54 guessed the echo correctly, but the cause is the zone's dynamic-update policy, not the library.
+
+### Documentation
+- README gains a **"The zone must be Secure only"** section under gss-tsig, stating the requirement (not as hardening advice but as the precondition for `gss-tsig` to authenticate anything) with the `Set-DnsServerPrimaryZone -DynamicUpdate Secure` fix.
+
 ## [0.3.1] — 2026-07-16
 
 ### Fixed

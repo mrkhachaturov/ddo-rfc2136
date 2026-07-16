@@ -118,6 +118,21 @@ The sidecar needs a way to get a Kerberos TGT at startup. Four sources are suppo
 | `RFC2136_KEYTAB_BASE64` | Keytab as base64-encoded bytes. Decoded into a `0600` temp file at startup. For secret stores that can only return strings. |
 | `RFC2136_KEYTAB_BASE64_FILE` | Same as `RFC2136_KEYTAB_BASE64` but the base64 string is read from a file path. Use when your secret store can only deliver strings as files (Docker secret holding a base64-encoded keytab, 1Password Connect → file sink, etc.). |
 
+### The zone must be "Secure only"
+
+Set the AD-integrated zone's dynamic-update policy to **Secure only**, not "Nonsecure and secure".
+
+This is not hardening advice — it is what makes `gss-tsig` do anything. On "Nonsecure and secure" AD takes the non-secure path: it applies the record **without checking your signature at all**, leaves the object owned by `SYSTEM` instead of your principal, and — having never run its TSIG code — returns your own request MIC verbatim rather than signing a reply. The record appears, so nothing looks broken, but every write is unauthenticated and no ACL protects it. Two operators sharing a zone cannot rely on ownership, and nothing stops a third party on the network from overwriting the same names.
+
+The tell is a warning on **every** UPDATE that the server did not sign its reply (see "Failure model"). Flip the zone to Secure only and it stops immediately: AD verifies the signature, signs its reply, and stamps the record with your principal as owner.
+
+```powershell
+Get-DnsServerZone -Name example.com | Select-Object ZoneName, ZoneType, DynamicUpdate
+Set-DnsServerPrimaryZone -Name example.com -DynamicUpdate Secure
+```
+
+Secure dynamic update also requires the principal to have create/write rights on the zone (Domain Admins and members of `DnsAdmins` have them by default; a plain service account needs them granted).
+
 ### Password mode
 
 ```bash
@@ -185,7 +200,7 @@ Worth knowing if you're going to operate this:
 - Each zone is pinned to its last successful DC. Failover walks the remaining DCs in `RFC2136_HOSTS` order on transient errors.
 - Per-zone UPDATEs are serialised. One in-flight UPDATE per zone at a time.
 - AXFR is all-or-nothing. A partial transfer or missing trailing SOA fails the whole zone for that cycle.
-- TSIG quirks observed against AD (response-TSIG verify failing after a `NOERROR` commit) are treated as success and logged as a warning. See `internal/dnsop/client_real.go` for the details.
+- A `NOERROR` whose reply we cannot verify is reported as applied and logged as a loud warning: the record is really there, but the server never authenticated us. See "The zone must be Secure only" below.
 
 ## License
 
