@@ -75,6 +75,18 @@ Optional:
 
 The sidecar has no env vars for any operator-identity concept. It does not read `PROJECT_LABEL`, `INSTANCE_ID`, or anything similar. The operator stamps its label on each request; the sidecar persists that value verbatim (see below).
 
+## Reads are not signed against Active Directory
+
+Worth knowing before it surprises you: under `gss-tsig` the AXFR goes out **unsigned and comes back unverified**, by design.
+
+Windows DNS does not do TSIG on zone transfers at all — there is no key setting for XFR in DNS Manager, `Set-DnsServerPrimaryZone`, the registry, or the `Dns-Zone` AD schema class, and Microsoft documents TSIG only for dynamic update. Transfers are authorised by the `SecureSecondaries` IP ACL and answered with no signature on any envelope. So there is nothing to verify, and asking `miekg/dns` to verify anyway just aborts the transfer.
+
+That is safe here because reads and writes are protected differently. Every UPDATE is GSS-TSIG signed and carries `NXRRSET`/`YXRRSET` prerequisites the DC evaluates itself, so a forged transfer can at worst make the sidecar send UPDATEs that fail — it cannot make the DC apply one.
+
+Two practical consequences: allow zone transfer to the sidecar's IP (`SecureSecondaries` + `SecondaryServers`), or `GET /records` returns `[]` and the operator loses its view of drift. And check that the ACL is not `TransferAnyServer`, or anyone who can reach the DC on TCP/53 can dump every internal name.
+
+`hmac-tsig` is the opposite: those servers do sign transfers, so that path signs and verifies.
+
 ## hmac-tsig: BIND, Knot, PowerDNS, Technitium
 
 ```bash

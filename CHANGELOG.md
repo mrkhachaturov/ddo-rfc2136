@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ddo-rfc2136 is a webhook sidecar for [docker-dns-operator](https://github.com/mrkhachaturov/docker-dns-operator), implementing the [external-dns webhook provider v1 contract](https://kubernetes-sigs.github.io/external-dns/latest/docs/tutorials/webhook-provider/) against any authoritative server that speaks RFC 2136 — Active Directory (GSS-TSIG), BIND, Knot, PowerDNS and Technitium (HMAC-TSIG). The same sidecar works with the upstream kubernetes-sigs/external-dns controller.
 
+## [0.3.1] — 2026-07-16
+
+### Fixed
+- **AXFR against Active Directory, broken by 0.3.0.** Every read failed with `dns: no signature found`, so the sidecar saw an empty zone, the operator concluded its records did not exist, and every create came back `YXRRSET` (the `NXRRSET` prerequisite fired because the record was already there). Net effect: no record changes applied at all. Upgrade straight to 0.3.1; **0.3.0 should not be deployed**.
+
+  Cause: 0.3.0 bumped `miekg/dns` 1.1.62 → 1.1.72, which contains [#1649](https://github.com/miekg/dns/pull/1649). That change makes an XFR client verify **every** envelope whenever a `TsigProvider` is set, instead of only those that actually carry a TSIG — closing a real hole where a server could simply omit the signature and have the client accept the data unverified.
+
+  We were exactly that case. **Windows DNS does not do TSIG on zone transfers at all**: there is no key setting for XFR in DNS Manager, `Set-DnsServerPrimaryZone`, the registry, or the `Dns-Zone` AD schema class (only `Dns-Allow-XFR` / `Dns-Secure-Secondaries` / `Dns-Notify-Secondaries`), and Microsoft documents TSIG solely for dynamic update. Transfers are authorised by the `SecureSecondaries` IP ACL and answered unsigned — confirmed on the wire against a live DC, where an AXFR carrying no signature returns the full zone with `NOERROR`. Under 1.1.62 that meant our transfers were silently never verified; under 1.1.72 they are correctly refused.
+
+  Fix: the `gss-tsig` AXFR path no longer sets a `TsigProvider`, and no longer negotiates a GSS context for a read it cannot sign anyway (one fewer TKEY exchange per zone per cycle). `hmac-tsig` is unaffected — BIND, Knot, PowerDNS and Technitium do sign transfers, so that path still signs and verifies.
+
+  **This is not a loss of protection versus 0.2.0**, where the same transfers were unverified by accident rather than by decision. Reads are unauthenticated; writes are not. Every UPDATE stays GSS-TSIG signed and carries `NXRRSET`/`YXRRSET` prerequisites the DC evaluates itself, so a forged transfer can only make the sidecar send UPDATEs that fail — it cannot make the DC apply one.
+
+### Added
+- Regression tests that stand up an in-process authoritative server and run a real transfer through it: a server that signs nothing must be accepted on the `gss-tsig` path, a signed one must verify on `hmac-tsig`, and the read must work with no GSS context at all. The absence of any test that exercised a transfer end-to-end is what let 0.3.0 ship.
+
 ## [0.3.0] — 2026-07-16
 
 ### Added
@@ -47,7 +63,8 @@ ddo-rfc2136 is a webhook sidecar for [docker-dns-operator](https://github.com/mr
 ### Changed
 - `resolveAuth` now lists five mutually-exclusive secret sources (was four). Misconfiguration error message updated to enumerate them all.
 
-[Unreleased]: https://github.com/mrkhachaturov/ddo-rfc2136/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mrkhachaturov/ddo-rfc2136/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/mrkhachaturov/ddo-rfc2136/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mrkhachaturov/ddo-rfc2136/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mrkhachaturov/ddo-rfc2136/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/mrkhachaturov/ddo-rfc2136/releases/tag/v0.1.1

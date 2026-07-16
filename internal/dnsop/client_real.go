@@ -26,22 +26,36 @@ type RealClient struct {
 	exchange func(client *dns.Client, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error)
 }
 
+// AXFR reads the zone unsigned, on purpose.
+//
+// Windows DNS does not do TSIG on zone transfers at all. There is no key
+// setting for XFR anywhere — not in DNS Manager, not in Set-DnsServerPrimaryZone,
+// not in the registry, not on the Dns-Zone AD schema class, which carries only
+// Dns-Allow-XFR / Dns-Secure-Secondaries / Dns-Notify-Secondaries. Microsoft
+// documents TSIG solely for dynamic update. Transfers are authorised by the
+// SecureSecondaries IP ACL, and the response comes back with no TSIG on any
+// envelope — verified on the wire against a live DC: an AXFR carrying no
+// signature returns the full zone, NOERROR.
+//
+// So there is nothing to negotiate and nothing to verify. Setting a
+// TsigProvider here would be worse than useless: since #1649 (miekg/dns
+// 1.1.72) the client verifies EVERY envelope when a provider is present, and
+// an unsigned reply aborts the transfer with "dns: no signature found". That
+// is what 0.3.0 shipped, and it took AD reconciliation down.
+//
+// Read-only and unauthenticated is acceptable here because writes are not:
+// every UPDATE is GSS-TSIG signed and carries NXRRSET/YXRRSET prerequisites the
+// DC evaluates itself. A forged transfer can make us send UPDATEs that fail; it
+// cannot make the DC apply one.
 func (c *RealClient) AXFR(host string, port int, zone string) RecordsResult {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	keyName, _, err := c.GSS.NegotiateContext(addr)
-	if err != nil {
-		return RecordsResult{OK: false, Phase: "gss-negotiate", Message: err.Error(), Retryable: true}
-	}
-	defer func() { _ = c.GSS.DeleteContext(keyName) }()
 
 	m := new(dns.Msg)
 	m.SetAxfr(dns.Fqdn(zone))
-	m.SetTsig(keyName, "gss-tsig.", 300, time.Now().Unix())
 
 	t := &dns.Transfer{
-		TsigProvider: c.GSS,
-		DialTimeout:  c.AxfrTimeout,
-		ReadTimeout:  c.AxfrTimeout,
+		DialTimeout: c.AxfrTimeout,
+		ReadTimeout: c.AxfrTimeout,
 	}
 	ch, err := t.In(m, addr)
 	if err != nil {
