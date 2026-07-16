@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ddo-rfc2136 is a webhook sidecar for [docker-dns-operator](https://github.com/mrkhachaturov/docker-dns-operator), implementing the [external-dns webhook provider v1 contract](https://kubernetes-sigs.github.io/external-dns/latest/docs/tutorials/webhook-provider/) against any authoritative server that speaks RFC 2136 — Active Directory (GSS-TSIG), BIND, Knot, PowerDNS and Technitium (HMAC-TSIG). The same sidecar works with the upstream kubernetes-sigs/external-dns controller.
 
-## [Unreleased]
+## [0.3.2] — 2026-07-16
 
 ### Fixed
 - **An unverifiable UPDATE reply was misdiagnosed as a benign library quirk.** When an UPDATE returned `NOERROR` but its reply carried no signature we could verify, the sidecar logged a vague "TSIG verify quirk (committed)" and moved on. That framing hid a real problem: per RFC 8945 a server that verified our signature signs its reply with the same key, so an unverifiable reply means the server **never checked us** — the write landed unauthenticated.
